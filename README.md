@@ -35,6 +35,17 @@ adb -s 192.168.1.89:5555 shell
 adb -s ZJ2116C14F5F931933B shell
 ```
 
+## HQ
+
+`hq/` is the local Node control surface. Its server talks to Alfred through authenticated ADB and serves the browser interface on loopback.
+
+```sh
+cd hq
+npm start
+```
+
+Open `http://127.0.0.1:4173`. Home shows live connectivity, battery, firmware, Linux, network, storage, thermal, and service telemetry. Cockpit currently establishes the remote-control layout; movement controls remain inactive until their robot interfaces and safety behavior are implemented.
+
 ## Engine
 
 `engine/` is a componentized Rust HTTP runtime deployed to `/data/alfred/alfred-engine`. It binds only to robot loopback and is reached through authenticated ADB forwarding. Its writable autostart integration requires no further firmware changes.
@@ -47,15 +58,19 @@ python3 setup/deploy_engine.py
 HTTP interface:
 
 - `GET /health`
+- `GET /v1/telemetry/battery`
 - `POST /v1/audio/play` with an `audio/ogg` body and `Content-Length`
 - `POST /v1/audio/stock/{number}`
 - `PUT /v1/audio/volume/{percent}`
+
+The engine persistently subscribes to the robot's ROS battery and charge-state topics. The latest observation is cached under `/data/alfred/state/`, so HQ retains the last known value across engine restarts. A fresh installation reports no value until the firmware publishes its first power event.
 
 The Mac's default libusb ADB backend fails with this robot; tools set `ADB_LIBUSB=0`. If an incompatible server is already running, stop it with `adb kill-server` before starting the native backend (this disconnects other ADB devices too).
 
 ## Layout
 
 - `runtime/`: normal connection, shell, status, audio playback.
+- `hq/`: Node server and minimal browser control surface.
 - `engine/`: minimal on-robot Rust command and streamed-audio engine.
 - `setup/`: initial access, authenticated startup, image preparation and installation.
 - `setup/research/`: archived investigation helpers, not the everyday interface.

@@ -1,0 +1,14 @@
+{
+  "name": "alfred-hq",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local command and telemetry surface for Alfred",
+  "scripts": {
+    "start": "node src/main.mjs",
+    "dev": "node --watch src/main.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

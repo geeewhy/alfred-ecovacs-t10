@@ -33,4 +33,6 @@ The default Mac backend is verified end-to-end. `native` invokes the installed `
 
 The on-robot engine is a loopback-only HTTP runtime. The HTTP interface, audio service, native firmware adapter, and temporary clip store are separate components behind narrow interfaces. The host client creates a temporary authenticated ADB forward; no unauthenticated LAN port is exposed.
 
+`GET /v1/telemetry/battery` returns the engine's latest ROS `/power/Battery` and `/power/ChargeState` observations. The telemetry component reconnects independently of HTTP and audio, and atomically persists its last state to `/data/alfred/state/battery.json`.
+
 `POST /v1/audio/play` streams an Ogg body into bounded `/tmp` storage and then invokes the native audio daemon. The firmware playback interface is file-oriented, so playback begins after the complete clip arrives. Up to eight recent clips are retained for asynchronous native playback and older clips are removed automatically.

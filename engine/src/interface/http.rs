@@ -1,4 +1,5 @@
 use crate::components::audio::AudioService;
+use crate::components::telemetry::{BatteryStatus, BatteryTelemetry};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -16,6 +17,7 @@ const MAX_CLIP_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone)]
 struct HttpState {
     audio: Arc<AudioService>,
+    battery: Arc<BatteryTelemetry>,
 }
 
 #[derive(Serialize)]
@@ -27,20 +29,30 @@ struct ApiResponse {
 pub struct HttpRuntime {
     address: String,
     audio: Arc<AudioService>,
+    battery: Arc<BatteryTelemetry>,
 }
 
 impl HttpRuntime {
-    pub fn new(address: impl Into<String>, audio: Arc<AudioService>) -> Self {
+    pub fn new(
+        address: impl Into<String>,
+        audio: Arc<AudioService>,
+        battery: Arc<BatteryTelemetry>,
+    ) -> Self {
         Self {
             address: address.into(),
             audio,
+            battery,
         }
     }
 
     pub async fn run(self) -> io::Result<()> {
-        let state = HttpState { audio: self.audio };
+        let state = HttpState {
+            audio: self.audio,
+            battery: self.battery,
+        };
         let app = Router::new()
             .route("/health", get(health))
+            .route("/v1/telemetry/battery", get(battery))
             .route("/v1/audio/play", post(play))
             .route("/v1/audio/stock/{number}", post(stock))
             .route("/v1/audio/volume/{percent}", put(volume))
@@ -50,6 +62,19 @@ impl HttpRuntime {
         eprintln!("alfred-engine listening on {}", self.address);
         axum::serve(listener, app).await
     }
+}
+
+#[derive(Serialize)]
+struct TelemetryResponse {
+    ok: bool,
+    result: BatteryStatus,
+}
+
+async fn battery(State(state): State<HttpState>) -> Json<TelemetryResponse> {
+    Json(TelemetryResponse {
+        ok: true,
+        result: state.battery.current().await,
+    })
 }
 
 async fn health() -> Json<ApiResponse> {
