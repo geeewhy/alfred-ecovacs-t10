@@ -1,0 +1,31 @@
+#!/bin/sh
+# Authenticated USB + Wi-Fi ADB. /data persists; logs remain in RAM.
+MODE="${1:-start}"
+case "$MODE" in
+ stop) killall adbd alfred-engine; exit 0 ;;
+ start|usb) ;;
+ *) exit 2 ;;
+esac
+[ -s /data/misc/adb/adb_keys ] || exit 1
+if [ -x /data/alfred/alfred-engine ] && ! pidof alfred-engine >/dev/null; then
+    if [ -f /data/alfred/start_engine.py ]; then
+        python /data/alfred/start_engine.py
+    else
+        /data/alfred/alfred-engine </dev/null >>/tmp/alfred-engine.log 2>&1 &
+    fi
+fi
+pidof adbd >/dev/null && exit 0
+# Property names contain dots; use env, not shell export.
+ROLE=/sys/devices/platform/soc/b2000000.usb/b2000000.dwc3/role
+if [ "$MODE" = usb ] && [ "$(cat "$ROLE" 2>/dev/null)" = device ]; then
+    rm -f /var/run/adbd.lock
+    # Patch only the daemon invocation in a temporary copy of the stock USB setup.
+    sed 's|^    adbd |    env PROP_service.adb.tcp.port=5555 PROP_ro.adb.secure=1 /usr/sbin/adbd |' /etc/rc.d/adbd.sh > /tmp/alfred-usb-adb.sh
+    /bin/sh /tmp/alfred-usb-adb.sh start >>/tmp/alfred-adb.log 2>&1
+    [ -n "$(cat /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null)" ] || exit 1
+else
+    # Boot default: reliable authenticated TCP ADB. USB is optional and must
+    # never prevent remote recovery when no host data link is present.
+    env PROP_service.adb.tcp.port=5555 PROP_ro.adb.secure=1 \
+        /usr/sbin/adbd </dev/null >>/tmp/alfred-adb.log 2>&1 &
+fi
