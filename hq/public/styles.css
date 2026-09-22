@@ -18,6 +18,7 @@
 * { box-sizing: border-box; }
 html, body, #app { min-height: 100%; margin: 0; }
 body { background: var(--canvas); color: var(--ink); font-size: 14px; }
+body.cockpit-mode { overflow: hidden; }
 a { color: inherit; text-decoration: none; }
 button { font: inherit; }
 svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -78,12 +79,15 @@ main { grid-column: 2; min-width: 0; }
 .service-mark.down { background: var(--offline); }
 .service-list code { color: var(--faint); font: 10px/1 var(--mono); }
 
-.cockpit-heading { display: flex; flex-direction: column; margin-bottom: 28px; }
-.cockpit-grid { display: grid; grid-template-columns: minmax(560px, 1fr) 280px; gap: 1px; background: var(--line); border: 1px solid var(--line); }
-.viewport, .control-deck { background: var(--canvas); }
+.cockpit-content { height: calc(100vh - 53px); padding-top: 24px; padding-bottom: 24px; display: flex; flex-direction: column; }
+.cockpit-heading { flex: none; display: flex; flex-direction: column; margin-bottom: 18px; }
+.cockpit-heading .eyebrow { margin-bottom: 10px; }
+.cockpit-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(560px, 1fr) 280px; gap: 1px; background: var(--line); border: 1px solid var(--line); }
+.viewport, .control-deck { min-height: 0; background: var(--canvas); }
+.viewport { display: flex; flex-direction: column; }
 .viewport-head, .viewport-foot { height: 43px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .viewport-head code, .viewport-foot { color: var(--faint); font: 10px/1 var(--mono); }
-.sensor-grid { min-height: 470px; display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(250px, .75fr); }
+.sensor-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(250px, .75fr); }
 .sensor-panel { min-width: 0; display: flex; flex-direction: column; }
 .sensor-panel + .sensor-panel { border-left: 1px solid var(--line); }
 .sensor-surface { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #fff; }
@@ -96,22 +100,25 @@ main { grid-column: 2; min-width: 0; }
 .camera-surface p.hidden { display: none; }
 .lidar-surface canvas { width: 100%; height: 100%; display: block; }
 .viewport-foot { border-top: 1px solid var(--line); border-bottom: 0; }
-.control-deck { padding: 18px; }
+.control-deck { padding: 18px; display: flex; flex-direction: column; overflow: hidden; }
 .deck-title { display: flex; align-items: center; justify-content: space-between; padding-bottom: 17px; border-bottom: 1px solid var(--line); }
-.dpad { width: 232px; margin: 52px auto; display: grid; grid-template: repeat(3, 72px) / repeat(3, 72px); gap: 8px; }
-.control { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--faint); }
+.dpad { width: 208px; margin: clamp(18px, 5vh, 40px) auto; display: grid; grid-template: repeat(3, 64px) / repeat(3, 64px); gap: 8px; }
+.control { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); cursor: pointer; touch-action: none; user-select: none; transition: background-color 100ms ease-out, border-color 100ms ease-out, color 100ms ease-out, transform 100ms ease-out; }
+.control:hover { border-color: var(--line-strong); color: var(--ink); }
+.control.active { border-color: oklch(0.74 0.08 265); background: oklch(0.955 0.025 265); color: var(--accent); transform: translateY(1px); }
 .control span { font: 17px/1 var(--mono); }
 .control small { font-size: 9px; }
 .control.forward { grid-area: 1 / 2; }
 .control.left { grid-area: 2 / 1; }
 .control.stop { grid-area: 2 / 2; border-color: oklch(0.86 0.03 28); color: var(--offline); }
+.control.stop:active { background: oklch(0.96 0.025 28); transform: translateY(1px); }
 .control.right { grid-area: 2 / 3; }
 .control.reverse { grid-area: 3 / 2; }
 .control-readouts { border-top: 1px solid var(--line); }
 .control-readouts > div { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 11px; }
 .control-readouts span { color: var(--muted); }
 .control-readouts strong { font: 10px/1 var(--mono); font-weight: 400; }
-.deck-note { margin-top: 28px; }
+.deck-note { margin-top: auto; padding-top: 18px; }
 .deck-note strong { font-size: 11px; }
 .deck-note p { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 
@@ -124,21 +131,27 @@ main { grid-column: 2; min-width: 0; }
   .nav-item { padding: 0 10px; }
   main { grid-column: 1; }
   .content, .cockpit-content { width: auto; padding: 38px 20px 60px; }
+  .cockpit-content { height: calc(100vh - 107px); padding-top: 20px; padding-bottom: 20px; }
   .robot-row { grid-template-columns: 40px 1fr 18px; }
   .connection { grid-column: 2; }
   .battery { grid-column: 2; }
   .row-arrow { grid-column: 3; grid-row: 1 / span 3; }
-  .detail-columns, .cockpit-grid { grid-template-columns: 1fr; gap: 46px; }
+  .detail-columns { grid-template-columns: 1fr; gap: 46px; }
+  .cockpit-grid { grid-template-columns: minmax(0, 1fr) 240px; }
   .sensor-grid { grid-template-columns: minmax(0, 1fr) 280px; }
+  .dpad { width: 172px; grid-template: repeat(3, 52px) / repeat(3, 52px); gap: 8px; }
 }
 
 @media (max-width: 560px) {
+  body.cockpit-mode { overflow: auto; }
   .topbar { padding: 0 20px; }
   .heading { margin-bottom: 30px; }
   .robot-row { padding-inline: 8px; gap: 12px; }
   .detail-columns { margin-top: 42px; }
   .metric { grid-template-columns: 110px 1fr; }
   .cockpit-grid { border-inline: 0; }
+  .cockpit-content { height: auto; }
+  .cockpit-grid { display: block; }
   .sensor-grid { grid-template-columns: 1fr; }
   .sensor-panel + .sensor-panel { border-left: 0; border-top: 1px solid var(--line); }
   .sensor-surface { min-height: 330px; }

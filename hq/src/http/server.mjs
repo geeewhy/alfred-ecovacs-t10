@@ -49,6 +49,23 @@ export class HqServer {
       return;
     }
 
+    if (request.method === "PUT" && url.pathname === "/api/bots/alfred/drive") {
+      try {
+        const vector = await readJson(request);
+        return json(response, 200, await this.engineClient.drive(vector));
+      } catch (error) {
+        return json(response, 503, { ok: false, error: error.message });
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/bots/alfred/drive/stop") {
+      try {
+        return json(response, 200, await this.engineClient.stop());
+      } catch (error) {
+        return json(response, 503, { ok: false, error: error.message });
+      }
+    }
+
     if (request.method === "GET" && await staticFile(response, this.config.publicDirectory, url.pathname)) return;
     json(response, 404, { error: "Not found" });
   }
@@ -58,4 +75,15 @@ export class HqServer {
       this.server.listen(this.config.port, this.config.host, resolve);
     });
   }
+}
+
+async function readJson(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 4_096) throw new Error("request body too large");
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }

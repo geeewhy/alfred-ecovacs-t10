@@ -44,7 +44,7 @@ cd hq
 npm start
 ```
 
-Open `http://127.0.0.1:4173`. Home shows live connectivity, battery, firmware, Linux, network, storage, thermal, and service telemetry. Cockpit shows the live 864×480 front camera and LIDAR point cloud. Movement controls remain inactive until their robot interfaces and safety behavior are implemented.
+Open `http://127.0.0.1:4173`. Home shows live connectivity, battery, firmware, Linux, network, storage, thermal, and service telemetry. Cockpit keeps the live 864×480 front camera and LIDAR point cloud visible while providing hold-to-drive controls for the two powered wheels. Arrow keys ramp speed while held; Shift temporarily selects full speed. Releasing controls or losing HQ communication stops the robot.
 
 ## Engine
 
@@ -61,11 +61,13 @@ HTTP interface:
 - `GET /v1/telemetry/battery`
 - `GET /v1/telemetry/lidar`
 - `GET /v1/camera/frame` (JPEG with frame metadata headers)
+- `PUT /v1/drive` (`linear` and `angular`, each from -1 to 1)
+- `POST /v1/drive/stop`
 - `POST /v1/audio/play` with an `audio/ogg` body and `Content-Length`
 - `POST /v1/audio/stock/{number}`
 - `PUT /v1/audio/volume/{percent}`
 
-The engine persistently subscribes to the robot's ROS battery, charge-state, and LIDAR topics. It activates the stock VPS/VENC camera path and maintains a low-rate JPEG snapshot feed without replacing the vendor media stack. Battery observations are cached under `/data/alfred/state/`, so HQ retains the last known value across engine restarts. A fresh installation reports no battery value until the firmware publishes its first power event.
+The engine persistently subscribes to the robot's ROS battery, charge-state, and LIDAR topics and publishes differential-drive commands to the stock wheel controller. A 350 ms dead-man timer publishes a stop if commands go stale. It activates the stock VPS/VENC camera path and maintains a low-rate JPEG snapshot feed without replacing the vendor media stack. Battery observations are cached under `/data/alfred/state/`, so HQ retains the last known value across engine restarts. A fresh installation reports no battery value until the firmware publishes its first power event.
 
 The Mac's default libusb ADB backend fails with this robot; tools set `ADB_LIBUSB=0`. If an incompatible server is already running, stop it with `adb kill-server` before starting the native backend (this disconnects other ADB devices too).
 

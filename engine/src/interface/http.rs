@@ -1,5 +1,6 @@
 use crate::components::audio::AudioService;
 use crate::components::camera::CameraTelemetry;
+use crate::components::drive::{DriveService, DriveState, DriveVector};
 use crate::components::lidar::{LidarScan, LidarTelemetry};
 use crate::components::telemetry::{BatteryStatus, BatteryTelemetry};
 use axum::body::Body;
@@ -22,6 +23,7 @@ struct HttpState {
     battery: Arc<BatteryTelemetry>,
     lidar: Arc<LidarTelemetry>,
     camera: Arc<CameraTelemetry>,
+    drive: Arc<DriveService>,
 }
 
 #[derive(Serialize)]
@@ -36,6 +38,7 @@ pub struct HttpRuntime {
     battery: Arc<BatteryTelemetry>,
     lidar: Arc<LidarTelemetry>,
     camera: Arc<CameraTelemetry>,
+    drive: Arc<DriveService>,
 }
 
 impl HttpRuntime {
@@ -45,6 +48,7 @@ impl HttpRuntime {
         battery: Arc<BatteryTelemetry>,
         lidar: Arc<LidarTelemetry>,
         camera: Arc<CameraTelemetry>,
+        drive: Arc<DriveService>,
     ) -> Self {
         Self {
             address: address.into(),
@@ -52,6 +56,7 @@ impl HttpRuntime {
             battery,
             lidar,
             camera,
+            drive,
         }
     }
 
@@ -61,12 +66,15 @@ impl HttpRuntime {
             battery: self.battery,
             lidar: self.lidar,
             camera: self.camera,
+            drive: self.drive,
         };
         let app = Router::new()
             .route("/health", get(health))
             .route("/v1/telemetry/battery", get(battery))
             .route("/v1/telemetry/lidar", get(lidar))
             .route("/v1/camera/frame", get(camera_frame))
+            .route("/v1/drive", put(drive))
+            .route("/v1/drive/stop", post(stop_drive))
             .route("/v1/audio/play", post(play))
             .route("/v1/audio/stock/{number}", post(stock))
             .route("/v1/audio/volume/{percent}", put(volume))
@@ -118,6 +126,33 @@ async fn camera_frame(State(state): State<HttpState>) -> impl IntoResponse {
     insert_header(&mut headers, "x-frame-height", frame.height);
     insert_header(&mut headers, "x-observed-at", frame.observed_at_unix_ms);
     (StatusCode::OK, headers, frame.jpeg)
+}
+
+#[derive(Serialize)]
+struct DriveResponse {
+    ok: bool,
+    result: DriveState,
+}
+
+async fn drive(
+    State(state): State<HttpState>,
+    Json(vector): Json<DriveVector>,
+) -> Result<Json<DriveResponse>, (StatusCode, Json<ApiResponse>)> {
+    drive_result(state.drive.command(vector).await)
+}
+
+async fn stop_drive(
+    State(state): State<HttpState>,
+) -> Result<Json<DriveResponse>, (StatusCode, Json<ApiResponse>)> {
+    drive_result(state.drive.stop().await)
+}
+
+fn drive_result(
+    value: Result<DriveState, String>,
+) -> Result<Json<DriveResponse>, (StatusCode, Json<ApiResponse>)> {
+    value
+        .map(|result| Json(DriveResponse { ok: true, result }))
+        .map_err(|message| failure(StatusCode::BAD_REQUEST, message))
 }
 
 fn insert_header(headers: &mut HeaderMap, name: &'static str, value: impl ToString) {

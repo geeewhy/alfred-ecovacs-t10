@@ -97,14 +97,14 @@ function home(robot) {
 }
 
 function controlButton(label, symbol, className = "") {
-  return `<button class="control ${className}" disabled><span>${symbol}</span><small>${label}</small></button>`;
+  return `<button class="control ${className}" data-drive="${className}" type="button"><span>${symbol}</span><small>${label}</small></button>`;
 }
 
 function cockpit(robot) {
   return shell(`
     <header class="topbar"><span>Cockpit</span><div class="top-status"><span class="status-dot ${robot?.online ? "online" : "offline"}"></span>${robot?.online ? "Alfred online" : "Alfred offline"}</div></header>
     <div class="cockpit-content">
-      <section class="heading cockpit-heading"><p class="eyebrow">ALFRED / DIRECT CONTROL</p><h1>Cockpit</h1><p>The remote-control workspace. Controls are intentionally inactive until their robot interfaces are verified.</p></section>
+      <section class="heading cockpit-heading"><p class="eyebrow">ALFRED / DIRECT CONTROL</p><h1>Cockpit</h1></section>
       <div class="cockpit-grid">
         <section class="viewport" aria-label="Robot sensors">
           <div class="sensor-grid">
@@ -123,7 +123,7 @@ function cockpit(robot) {
           <div class="viewport-foot"><span>DBX53</span><span>${robot?.network?.address ?? "192.168.1.89"}</span><span>${robot?.system?.temperatureC ?? "—"} °C</span></div>
         </section>
         <aside class="control-deck">
-          <div class="deck-title"><h2>Drive</h2><span>Interface pending</span></div>
+          <div class="deck-title"><h2>Drive</h2><span id="drive-status">Ready</span></div>
           <div class="dpad">
             ${controlButton("Forward", "↑", "forward")}
             ${controlButton("Left", "←", "left")}
@@ -132,10 +132,10 @@ function cockpit(robot) {
             ${controlButton("Reverse", "↓", "reverse")}
           </div>
           <div class="control-readouts">
-            <div><span>Linear</span><strong>0.00 m/s</strong></div>
-            <div><span>Angular</span><strong>0.00 rad/s</strong></div>
+            <div><span>Throttle</span><strong id="drive-throttle">0%</strong></div>
+            <div><span>Wheels L / R</span><strong id="drive-wheels">0 / 0 mm/s</strong></div>
           </div>
-          <div class="deck-note"><strong>Next interface</strong><p>Bind verified ROS movement commands, then add hold-to-drive safety and a dead-man stop.</p></div>
+          <div class="deck-note"><strong>Hold to drive</strong><p>Use arrow keys or the controls. Speed ramps while held. Hold Shift for full speed; release any direction to stop it. The engine dead-man stops stale commands.</p></div>
         </aside>
       </div>
     </div>`, "cockpit");
@@ -143,17 +143,148 @@ function cockpit(robot) {
 
 let robot = null;
 let cockpitRun = 0;
+const driveKeys = new Set();
+const drivePointers = new Map();
+let driveStartedAt = 0;
+let driveTimer = null;
+let lastDriveVector = { linear: 0, angular: 0 };
+let driveEpoch = 0;
 
 function route() {
+  stopDrive();
   const run = ++cockpitRun;
+  document.body.classList.toggle("cockpit-mode", location.pathname === "/cockpit");
   app.innerHTML = location.pathname === "/cockpit" ? cockpit(robot) : home(robot);
   document.querySelectorAll("[data-route]").forEach((link) => link.addEventListener("click", (event) => {
     event.preventDefault();
     history.pushState({}, "", link.href);
     route();
   }));
-  if (location.pathname === "/cockpit") startSensors(run);
+  if (location.pathname === "/cockpit") {
+    startSensors(run);
+    startControls();
+  }
 }
+
+function activeDirections() {
+  return new Set([...driveKeys, ...drivePointers.values()]);
+}
+
+function driveVector() {
+  const active = activeDirections();
+  const vertical = Number(active.has("forward")) - Number(active.has("reverse"));
+  const horizontal = Number(active.has("right")) - Number(active.has("left"));
+  if (!vertical && !horizontal) return { linear: 0, angular: 0, throttle: 0 };
+  const heldMs = driveStartedAt ? performance.now() - driveStartedAt : 0;
+  const ramp = Math.min(1, .12 + heldMs / 1_800);
+  const throttle = driveKeys.has("boost") ? 1 : ramp;
+  return { linear: vertical * throttle, angular: horizontal * throttle, throttle };
+}
+
+function renderDrive(state = null) {
+  const vector = driveVector();
+  document.querySelectorAll("[data-drive]").forEach((button) => {
+    button.classList.toggle("active", activeDirections().has(button.dataset.drive));
+  });
+  const throttle = document.querySelector("#drive-throttle");
+  if (throttle) throttle.textContent = `${Math.round(vector.throttle * 100)}%${driveKeys.has("boost") ? " · BOOST" : ""}`;
+  const wheels = document.querySelector("#drive-wheels");
+  if (wheels && state) wheels.textContent = `${Math.round(state.left_mm_s)} / ${Math.round(state.right_mm_s)} mm/s`;
+}
+
+async function sendDrive() {
+  const epoch = driveEpoch;
+  const vector = driveVector();
+  lastDriveVector = vector;
+  renderDrive();
+  try {
+    const response = await fetch("/api/bots/alfred/drive", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ linear: vector.linear, angular: vector.angular }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const { result } = await response.json();
+    if (epoch !== driveEpoch) return;
+    renderDrive(result);
+    const status = document.querySelector("#drive-status");
+    if (status) status.textContent = result.active ? "Driving" : "Ready";
+  } catch {
+    const status = document.querySelector("#drive-status");
+    if (status) status.textContent = "Drive offline";
+  }
+}
+
+function ensureDriveTimer() {
+  const directions = activeDirections();
+  const active = ["forward", "reverse", "left", "right"].some((direction) => directions.has(direction));
+  if (active && !driveStartedAt) driveStartedAt = performance.now();
+  if (active && !driveTimer) {
+    sendDrive();
+    driveTimer = setInterval(sendDrive, 100);
+  } else if (!active) {
+    stopDrive(directions.has("boost"));
+  }
+}
+
+function stopDrive(preserveBoost = false) {
+  const shouldNotify = driveTimer || lastDriveVector.linear !== 0 || lastDriveVector.angular !== 0;
+  const boostHeld = preserveBoost && driveKeys.has("boost");
+  driveEpoch += 1;
+  driveKeys.clear();
+  if (boostHeld) driveKeys.add("boost");
+  drivePointers.clear();
+  driveStartedAt = 0;
+  if (driveTimer) clearInterval(driveTimer);
+  driveTimer = null;
+  lastDriveVector = { linear: 0, angular: 0 };
+  renderDrive({ left_mm_s: 0, right_mm_s: 0 });
+  if (shouldNotify || location.pathname === "/cockpit") {
+    fetch("/api/bots/alfred/drive/stop", { method: "POST", keepalive: true }).catch(() => {});
+  }
+}
+
+function startControls() {
+  document.querySelectorAll("[data-drive]").forEach((button) => {
+    const direction = button.dataset.drive;
+    button.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      if (direction === "stop") return stopDrive();
+      button.setPointerCapture(event.pointerId);
+      drivePointers.set(event.pointerId, direction);
+      ensureDriveTimer();
+    });
+    const release = (event) => {
+      if (!drivePointers.delete(event.pointerId)) return;
+      ensureDriveTimer();
+    };
+    button.addEventListener("pointerup", release);
+    button.addEventListener("pointercancel", release);
+    button.addEventListener("lostpointercapture", release);
+  });
+}
+
+const keyDirections = { ArrowUp: "forward", ArrowDown: "reverse", ArrowLeft: "left", ArrowRight: "right" };
+window.addEventListener("keydown", (event) => {
+  if (location.pathname !== "/cockpit") return;
+  const direction = event.key === "Shift" ? "boost" : keyDirections[event.key];
+  if (!direction) return;
+  event.preventDefault();
+  if (driveKeys.has(direction)) return;
+  driveKeys.add(direction);
+  ensureDriveTimer();
+  if (direction === "boost" && activeDirections().size > 1) sendDrive();
+});
+window.addEventListener("keyup", (event) => {
+  const direction = event.key === "Shift" ? "boost" : keyDirections[event.key];
+  if (!direction || !driveKeys.delete(direction)) return;
+  event.preventDefault();
+  if (direction === "boost" && activeDirections().size) sendDrive();
+  else ensureDriveTimer();
+});
+window.addEventListener("blur", () => stopDrive());
+window.addEventListener("pagehide", () => stopDrive());
+document.addEventListener("visibilitychange", () => { if (document.hidden) stopDrive(); });
 
 function prepareCanvas(canvas) {
   const bounds = canvas.getBoundingClientRect();
@@ -263,7 +394,11 @@ async function refresh() {
   } catch (error) {
     robot = { name: "Alfred", model: "Ecovacs T10 Omni DBX53", online: false, observedAt: new Date().toISOString(), error: error.message };
   }
-  route();
+  if (location.pathname !== "/cockpit" || !document.querySelector(".cockpit-grid")) route();
+  else {
+    const status = document.querySelector(".top-status");
+    if (status) status.innerHTML = `<span class="status-dot ${robot?.online ? "online" : "offline"}"></span>${robot?.online ? "Alfred online" : "Alfred offline"}`;
+  }
 }
 
 window.addEventListener("popstate", route);

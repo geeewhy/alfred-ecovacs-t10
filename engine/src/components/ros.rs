@@ -1,10 +1,13 @@
 use std::io;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast;
 
 const MASTER_ADDRESS: &str = "127.0.0.1:11311";
 const CALLER_ID: &str = "/alfred_engine";
 
+#[derive(Clone, Copy)]
 pub struct RosTopic {
     pub name: &'static str,
     pub publisher_node: &'static str,
@@ -14,6 +17,11 @@ pub struct RosTopic {
 }
 
 pub struct RosSubscriber;
+
+pub struct RosPublisher {
+    topic: RosTopic,
+    messages: broadcast::Sender<Vec<u8>>,
+}
 
 impl RosSubscriber {
     pub async fn subscribe<F>(topic: &RosTopic, mut receive: F) -> Result<(), String>
@@ -34,6 +42,109 @@ impl RosSubscriber {
             let payload = read_frame(&mut stream, topic.max_frame_bytes).await?;
             receive(&payload)?;
         }
+    }
+}
+
+impl RosPublisher {
+    pub async fn start(topic: RosTopic) -> Result<Arc<Self>, String> {
+        let message_listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_string)?;
+        let message_port = message_listener.local_addr().map_err(io_string)?.port();
+        let rpc_listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_string)?;
+        let rpc_port = rpc_listener.local_addr().map_err(io_string)?.port();
+        let (messages, _) = broadcast::channel(16);
+        let publisher = Arc::new(Self { topic, messages });
+
+        let message_service = Arc::clone(&publisher);
+        tokio::spawn(async move {
+            message_service.serve_messages(message_listener).await;
+        });
+        tokio::spawn(async move {
+            serve_publisher_rpc(rpc_listener, message_port).await;
+        });
+
+        register_publisher(&topic, rpc_port).await?;
+        Ok(publisher)
+    }
+
+    pub fn publish(&self, payload: Vec<u8>) -> Result<(), String> {
+        self.messages
+            .send(payload)
+            .map(|_| ())
+            .map_err(|_| "ROS publisher has no subscribers".to_string())
+    }
+
+    async fn serve_messages(self: Arc<Self>, listener: TcpListener) {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let service = Arc::clone(&self);
+            tokio::spawn(async move {
+                if let Err(error) = service.serve_subscriber(stream).await {
+                    eprintln!("ROS publisher subscriber closed: {error}");
+                }
+            });
+        }
+    }
+
+    async fn serve_subscriber(&self, mut stream: TcpStream) -> Result<(), String> {
+        read_frame(&mut stream, 64 * 1024).await?;
+        write_publisher_header(&mut stream, &self.topic).await?;
+        let mut messages = self.messages.subscribe();
+        loop {
+            let payload = messages.recv().await.map_err(|error| error.to_string())?;
+            stream
+                .write_all(&(payload.len() as u32).to_le_bytes())
+                .await
+                .map_err(io_string)?;
+            stream.write_all(&payload).await.map_err(io_string)?;
+        }
+    }
+}
+
+async fn register_publisher(topic: &RosTopic, rpc_port: u16) -> Result<(), String> {
+    let body = method_call(
+        "registerPublisher",
+        &[
+            string_param(CALLER_ID),
+            string_param(topic.name),
+            string_param(topic.message_type),
+            string_param(&format!("http://127.0.0.1:{rpc_port}/")),
+        ],
+    );
+    xmlrpc(MASTER_ADDRESS, &body).await.map(|_| ())
+}
+
+async fn serve_publisher_rpc(listener: TcpListener, message_port: u16) {
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            continue;
+        };
+        tokio::spawn(async move {
+            let mut request = vec![0_u8; 64 * 1024];
+            let Ok(length) = stream.read(&mut request).await else {
+                return;
+            };
+            let request = String::from_utf8_lossy(&request[..length]);
+            let value = if request.contains("<methodName>requestTopic</methodName>") {
+                format!(
+                    "<value><array><data><value><int>1</int></value><value><string>ready</string></value><value><array><data><value><string>TCPROS</string></value><value><string>127.0.0.1</string></value><value><int>{message_port}</int></value></data></array></value></data></array></value>"
+                )
+            } else {
+                format!(
+                    "<value><array><data><value><int>1</int></value><value><string>ready</string></value><value><int>{}</int></value></data></array></value>",
+                    std::process::id()
+                )
+            };
+            let body = format!(
+                "<?xml version=\"1.0\"?><methodResponse><params><param>{value}</param></params></methodResponse>"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
     }
 }
 
@@ -101,6 +212,25 @@ async fn write_tcpros_header(stream: &mut TcpStream, topic: &RosTopic) -> Result
         format!("topic={}", topic.name),
         format!("type={}", topic.message_type),
         "tcp_nodelay=1".to_string(),
+    ];
+    let mut header = Vec::new();
+    for field in fields {
+        header.extend_from_slice(&(field.len() as u32).to_le_bytes());
+        header.extend_from_slice(field.as_bytes());
+    }
+    stream
+        .write_all(&(header.len() as u32).to_le_bytes())
+        .await
+        .map_err(io_string)?;
+    stream.write_all(&header).await.map_err(io_string)
+}
+
+async fn write_publisher_header(stream: &mut TcpStream, topic: &RosTopic) -> Result<(), String> {
+    let fields = [
+        format!("callerid={CALLER_ID}"),
+        format!("md5sum={}", topic.md5),
+        format!("type={}", topic.message_type),
+        "latching=0".to_string(),
     ];
     let mut header = Vec::new();
     for field in fields {
