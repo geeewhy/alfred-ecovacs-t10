@@ -106,9 +106,20 @@ function cockpit(robot) {
     <div class="cockpit-content">
       <section class="heading cockpit-heading"><p class="eyebrow">ALFRED / DIRECT CONTROL</p><h1>Cockpit</h1><p>The remote-control workspace. Controls are intentionally inactive until their robot interfaces are verified.</p></section>
       <div class="cockpit-grid">
-        <section class="viewport" aria-label="Robot view placeholder">
-          <div class="viewport-head"><span>Forward camera</span><code>source not connected</code></div>
-          <div class="viewport-empty"><span class="horizon"></span><div class="reticle"></div><p>Video and map surface</p></div>
+        <section class="viewport" aria-label="Robot sensors">
+          <div class="sensor-grid">
+            <section class="sensor-panel camera-panel">
+              <div class="viewport-head"><span>Forward camera</span><code id="camera-status">CONNECTING</code></div>
+              <div class="sensor-surface camera-surface">
+                <canvas id="camera-canvas"></canvas>
+                <p id="camera-empty">Waiting for camera pipeline</p>
+              </div>
+            </section>
+            <section class="sensor-panel lidar-panel">
+              <div class="viewport-head"><span>LIDAR</span><code id="lidar-status">CONNECTING</code></div>
+              <div class="sensor-surface lidar-surface"><canvas id="lidar-canvas"></canvas></div>
+            </section>
+          </div>
           <div class="viewport-foot"><span>DBX53</span><span>${robot?.network?.address ?? "192.168.1.89"}</span><span>${robot?.system?.temperatureC ?? "—"} °C</span></div>
         </section>
         <aside class="control-deck">
@@ -131,14 +142,117 @@ function cockpit(robot) {
 }
 
 let robot = null;
+let cockpitRun = 0;
 
 function route() {
+  const run = ++cockpitRun;
   app.innerHTML = location.pathname === "/cockpit" ? cockpit(robot) : home(robot);
   document.querySelectorAll("[data-route]").forEach((link) => link.addEventListener("click", (event) => {
     event.preventDefault();
     history.pushState({}, "", link.href);
     route();
   }));
+  if (location.pathname === "/cockpit") startSensors(run);
+}
+
+function prepareCanvas(canvas) {
+  const bounds = canvas.getBoundingClientRect();
+  const ratio = Math.min(devicePixelRatio || 1, 2);
+  const width = Math.max(1, Math.round(bounds.width * ratio));
+  const height = Math.max(1, Math.round(bounds.height * ratio));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  return { context: canvas.getContext("2d"), width, height, ratio };
+}
+
+function drawLidar(scan) {
+  const canvas = document.querySelector("#lidar-canvas");
+  if (!canvas) return;
+  const { context, width, height, ratio } = prepareCanvas(canvas);
+  context.clearRect(0, 0, width, height);
+  context.strokeStyle = "#e1e4e8";
+  context.lineWidth = ratio;
+  context.beginPath();
+  context.moveTo(width / 2, 0);
+  context.lineTo(width / 2, height);
+  context.moveTo(0, height / 2);
+  context.lineTo(width, height / 2);
+  context.stroke();
+
+  const points = scan.points ?? [];
+  const distances = points.map(({ x, y }) => Math.hypot(x, y)).filter(Number.isFinite).sort((a, b) => a - b);
+  const extent = Math.max(distances[Math.floor(distances.length * .96)] ?? 1, 1);
+  const scale = Math.min(width, height) * .44 / extent;
+  context.fillStyle = "#30343a";
+  for (const point of points) {
+    const px = width / 2 + point.y * scale;
+    const py = height / 2 - point.x * scale;
+    if (px < 0 || py < 0 || px > width || py > height) continue;
+    context.globalAlpha = Math.max(.22, Math.min(.9, point.power / 700));
+    context.fillRect(px, py, Math.max(1.2 * ratio, 1), Math.max(1.2 * ratio, 1));
+  }
+  context.globalAlpha = 1;
+  context.fillStyle = "#5b65d8";
+  context.beginPath();
+  context.moveTo(width / 2, height / 2 - 7 * ratio);
+  context.lineTo(width / 2 - 5 * ratio, height / 2 + 5 * ratio);
+  context.lineTo(width / 2 + 5 * ratio, height / 2 + 5 * ratio);
+  context.closePath();
+  context.fill();
+}
+
+async function pollLidar(run) {
+  try {
+    const response = await fetch("/api/bots/alfred/lidar", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const { result } = await response.json();
+    if (run !== cockpitRun) return;
+    drawLidar(result);
+    const status = document.querySelector("#lidar-status");
+    const fresh = Date.now() - result.observed_at_unix_ms < 2_000;
+    if (status) status.textContent = `${result.source_points ?? 0} PTS · ${fresh ? "LIVE" : "STALE"}`;
+  } catch {
+    const status = document.querySelector("#lidar-status");
+    if (status) status.textContent = "SOURCE OFFLINE";
+  }
+  if (run === cockpitRun) setTimeout(() => pollLidar(run), 250);
+}
+
+async function pollCamera(run) {
+  try {
+    const response = await fetch("/api/bots/alfred/camera/frame", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const width = Number(response.headers.get("x-frame-width"));
+    const height = Number(response.headers.get("x-frame-height"));
+    const observedAt = Number(response.headers.get("x-observed-at"));
+    const bitmap = await createImageBitmap(await response.blob());
+    if (run !== cockpitRun) {
+      bitmap.close();
+      return;
+    }
+    const canvas = document.querySelector("#camera-canvas");
+    if (!canvas) return;
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+    bitmap.close();
+    canvas.classList.add("visible");
+    document.querySelector("#camera-empty")?.classList.add("hidden");
+    const status = document.querySelector("#camera-status");
+    const fresh = Date.now() - observedAt < 2_000;
+    if (status) status.textContent = `${width}×${height} · ${fresh ? "LIVE" : "STALE"}`;
+  } catch {
+    const status = document.querySelector("#camera-status");
+    if (status) status.textContent = "SOURCE OFFLINE";
+  }
+  if (run === cockpitRun) setTimeout(() => pollCamera(run), 650);
+}
+
+function startSensors(run) {
+  pollLidar(run);
+  pollCamera(run);
 }
 
 async function refresh() {

@@ -25,4 +25,16 @@ export class AdbClient {
     }
     return result.stdout;
   }
+
+  async forward(localPort, remotePort) {
+    await this.connect();
+    const result = await this.processRunner.run(
+      "adb",
+      ["-s", this.address, "forward", `tcp:${localPort}`, `tcp:${remotePort}`],
+      { env: ADB_ENV, timeoutMs: 3_500 },
+    );
+    if (result.code !== 0) {
+      throw new Error(result.stderr.trim() || `adb forward exited ${result.code}`);
+    }
+  }
 }

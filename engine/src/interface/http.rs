@@ -1,8 +1,10 @@
 use crate::components::audio::AudioService;
+use crate::components::camera::CameraTelemetry;
+use crate::components::lidar::{LidarScan, LidarTelemetry};
 use crate::components::telemetry::{BatteryStatus, BatteryTelemetry};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -18,6 +20,8 @@ const MAX_CLIP_BYTES: usize = 16 * 1024 * 1024;
 struct HttpState {
     audio: Arc<AudioService>,
     battery: Arc<BatteryTelemetry>,
+    lidar: Arc<LidarTelemetry>,
+    camera: Arc<CameraTelemetry>,
 }
 
 #[derive(Serialize)]
@@ -30,6 +34,8 @@ pub struct HttpRuntime {
     address: String,
     audio: Arc<AudioService>,
     battery: Arc<BatteryTelemetry>,
+    lidar: Arc<LidarTelemetry>,
+    camera: Arc<CameraTelemetry>,
 }
 
 impl HttpRuntime {
@@ -37,11 +43,15 @@ impl HttpRuntime {
         address: impl Into<String>,
         audio: Arc<AudioService>,
         battery: Arc<BatteryTelemetry>,
+        lidar: Arc<LidarTelemetry>,
+        camera: Arc<CameraTelemetry>,
     ) -> Self {
         Self {
             address: address.into(),
             audio,
             battery,
+            lidar,
+            camera,
         }
     }
 
@@ -49,10 +59,14 @@ impl HttpRuntime {
         let state = HttpState {
             audio: self.audio,
             battery: self.battery,
+            lidar: self.lidar,
+            camera: self.camera,
         };
         let app = Router::new()
             .route("/health", get(health))
             .route("/v1/telemetry/battery", get(battery))
+            .route("/v1/telemetry/lidar", get(lidar))
+            .route("/v1/camera/frame", get(camera_frame))
             .route("/v1/audio/play", post(play))
             .route("/v1/audio/stock/{number}", post(stock))
             .route("/v1/audio/volume/{percent}", put(volume))
@@ -70,11 +84,46 @@ struct TelemetryResponse {
     result: BatteryStatus,
 }
 
+#[derive(Serialize)]
+struct LidarResponse {
+    ok: bool,
+    result: LidarScan,
+}
+
 async fn battery(State(state): State<HttpState>) -> Json<TelemetryResponse> {
     Json(TelemetryResponse {
         ok: true,
         result: state.battery.current().await,
     })
+}
+
+async fn lidar(State(state): State<HttpState>) -> Json<LidarResponse> {
+    Json(LidarResponse {
+        ok: true,
+        result: state.lidar.current().await,
+    })
+}
+
+async fn camera_frame(State(state): State<HttpState>) -> impl IntoResponse {
+    let Some(frame) = state.camera.current().await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            HeaderMap::new(),
+            Vec::new(),
+        );
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("image/jpeg"));
+    insert_header(&mut headers, "x-frame-width", frame.width);
+    insert_header(&mut headers, "x-frame-height", frame.height);
+    insert_header(&mut headers, "x-observed-at", frame.observed_at_unix_ms);
+    (StatusCode::OK, headers, frame.jpeg)
+}
+
+fn insert_header(headers: &mut HeaderMap, name: &'static str, value: impl ToString) {
+    if let Ok(value) = HeaderValue::from_str(&value.to_string()) {
+        headers.insert(name, value);
+    }
 }
 
 async fn health() -> Json<ApiResponse> {

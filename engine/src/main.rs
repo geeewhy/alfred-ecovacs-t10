@@ -2,7 +2,9 @@ mod components;
 mod interface;
 
 use components::audio::{AudioService, NativeAudio};
+use components::camera::{CameraTelemetry, NativeCamera};
 use components::clips::TempClipStore;
+use components::lidar::LidarTelemetry;
 use components::power::NativeBatterySnapshot;
 use components::telemetry::BatteryTelemetry;
 use interface::http::HttpRuntime;
@@ -16,7 +18,12 @@ async fn main() -> std::io::Result<()> {
     let snapshot = Arc::new(NativeBatterySnapshot::new());
     let battery = BatteryTelemetry::new("/data/alfred/state/battery.json", snapshot).await;
     battery.start();
-    HttpRuntime::new("127.0.0.1:8765", audio, battery)
+    let lidar = LidarTelemetry::new();
+    lidar.start();
+    let camera_source = Arc::new(NativeCamera::new("/tmp/alfred-camera.jpg"));
+    let camera = CameraTelemetry::new(camera_source);
+    camera.start();
+    HttpRuntime::new("127.0.0.1:8765", audio, battery, lidar, camera)
         .run()
         .await
 }

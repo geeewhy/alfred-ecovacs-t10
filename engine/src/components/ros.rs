@@ -7,8 +7,10 @@ const CALLER_ID: &str = "/alfred_engine";
 
 pub struct RosTopic {
     pub name: &'static str,
+    pub publisher_node: &'static str,
     pub message_type: &'static str,
     pub md5: &'static str,
+    pub max_frame_bytes: usize,
 }
 
 pub struct RosSubscriber;
@@ -18,7 +20,7 @@ impl RosSubscriber {
     where
         F: FnMut(&[u8]) -> Result<(), String>,
     {
-        let publisher_uri = lookup_node("/node").await?;
+        let publisher_uri = lookup_node(topic.publisher_node).await?;
         let (host, port) = request_topic(&publisher_uri, topic.name).await?;
         let address = format!("{}:{}", normalize_host(&host), port);
         let mut stream = TcpStream::connect(&address)
@@ -26,10 +28,10 @@ impl RosSubscriber {
             .map_err(|error| format!("cannot connect to ROS publisher {address}: {error}"))?;
 
         write_tcpros_header(&mut stream, topic).await?;
-        read_frame(&mut stream).await?;
+        read_frame(&mut stream, 64 * 1024).await?;
 
         loop {
-            let payload = read_frame(&mut stream).await?;
+            let payload = read_frame(&mut stream, topic.max_frame_bytes).await?;
             receive(&payload)?;
         }
     }
@@ -112,11 +114,11 @@ async fn write_tcpros_header(stream: &mut TcpStream, topic: &RosTopic) -> Result
     stream.write_all(&header).await.map_err(io_string)
 }
 
-async fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+async fn read_frame(stream: &mut TcpStream, max_bytes: usize) -> Result<Vec<u8>, String> {
     let mut length = [0_u8; 4];
     stream.read_exact(&mut length).await.map_err(io_string)?;
     let length = u32::from_le_bytes(length) as usize;
-    if length > 1024 * 1024 {
+    if length > max_bytes {
         return Err(format!("ROS frame exceeds limit: {length}"));
     }
     let mut payload = vec![0_u8; length];

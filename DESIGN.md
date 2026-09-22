@@ -28,6 +28,8 @@ A narrow global rail and a broad content plane on desktop. Collapse to a compact
 - Status marks are small, labeled, and never color-only.
 - Technical values use definition-list rows with stable alignment.
 - Primary robot row is selectable and leads to Cockpit.
+- Cockpit keeps the forward camera and LIDAR visible together, with terse live/source status in each sensor header.
+- Sensor imagery stays inside neutral, square-edged technical planes; telemetry is rendered directly without ornamental radar effects.
 - Cockpit controls use a single consistent button vocabulary and remain visibly non-operational until implemented.
 - Loading uses quiet skeleton lines; failures preserve the last known layout.
 

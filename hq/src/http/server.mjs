@@ -2,9 +2,10 @@ import { createServer } from "node:http";
 import { json, staticFile } from "./responses.mjs";
 
 export class HqServer {
-  constructor(config, statusService) {
+  constructor(config, statusService, engineClient) {
     this.config = config;
     this.statusService = statusService;
+    this.engineClient = engineClient;
     this.server = createServer(this.handle.bind(this));
   }
 
@@ -18,6 +19,34 @@ export class HqServer {
 
     if (request.method === "GET" && url.pathname === "/api/health") {
       return json(response, 200, { ok: true, service: "hq", version: "0.1.0" });
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/bots/alfred/lidar") {
+      try {
+        const scan = await this.engineClient.lidar();
+        return json(response, 200, scan);
+      } catch (error) {
+        return json(response, 503, { ok: false, error: error.message });
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/bots/alfred/camera/frame") {
+      try {
+        const frame = await this.engineClient.cameraFrame();
+        const headers = {
+          "Content-Type": frame.headers.get("content-type") ?? "application/octet-stream",
+          "Cache-Control": "no-store",
+        };
+        for (const name of ["x-frame-width", "x-frame-height", "x-observed-at"]) {
+          const value = frame.headers.get(name);
+          if (value) headers[name] = value;
+        }
+        response.writeHead(frame.status, headers);
+        response.end(Buffer.from(await frame.arrayBuffer()));
+      } catch (error) {
+        return json(response, 503, { ok: false, error: error.message });
+      }
+      return;
     }
 
     if (request.method === "GET" && await staticFile(response, this.config.publicDirectory, url.pathname)) return;

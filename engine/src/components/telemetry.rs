@@ -8,13 +8,17 @@ use tokio::sync::RwLock;
 
 const BATTERY_TOPIC: RosTopic = RosTopic {
     name: "/power/Battery",
+    publisher_node: "/node",
     message_type: "power/Battery",
     md5: "1f868bac590fa9e653b61dc342b25421",
+    max_frame_bytes: 1024,
 };
 const CHARGE_TOPIC: RosTopic = RosTopic {
     name: "/power/ChargeState",
+    publisher_node: "/node",
     message_type: "power/ChargeState",
     md5: "3f40efefe99d0b54d25afc2ed5523fc0",
+    max_frame_bytes: 1024,
 };
 
 #[derive(Clone, Default, Deserialize, Serialize)]

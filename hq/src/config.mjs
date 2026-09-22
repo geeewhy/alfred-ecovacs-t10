@@ -12,6 +12,7 @@ export async function loadConfig() {
     host: process.env.HQ_HOST ?? "127.0.0.1",
     port: Number(process.env.HQ_PORT ?? 4173),
     publicDirectory: path.join(root, "hq/public"),
+    engineForwardPort: Number(process.env.HQ_ENGINE_PORT ?? 48765),
     robot: {
       id: "alfred",
       name: "Alfred",

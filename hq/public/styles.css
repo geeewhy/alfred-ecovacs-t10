@@ -79,16 +79,22 @@ main { grid-column: 2; min-width: 0; }
 .service-list code { color: var(--faint); font: 10px/1 var(--mono); }
 
 .cockpit-heading { display: flex; flex-direction: column; margin-bottom: 28px; }
-.cockpit-grid { display: grid; grid-template-columns: minmax(500px, 1fr) 300px; gap: 1px; background: var(--line); border: 1px solid var(--line); }
+.cockpit-grid { display: grid; grid-template-columns: minmax(560px, 1fr) 280px; gap: 1px; background: var(--line); border: 1px solid var(--line); }
 .viewport, .control-deck { background: var(--canvas); }
 .viewport-head, .viewport-foot { height: 43px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .viewport-head code, .viewport-foot { color: var(--faint); font: 10px/1 var(--mono); }
-.viewport-empty { position: relative; min-height: 470px; display: grid; place-items: center; overflow: hidden; background: var(--canvas); }
-.viewport-empty::before { content: ""; position: absolute; width: 70%; aspect-ratio: 1; border: 1px solid var(--line); border-radius: 50%; }
-.viewport-empty::after { content: ""; position: absolute; width: 1px; height: 100%; background: var(--line); }
-.viewport-empty .horizon { position: absolute; width: 100%; height: 1px; background: var(--line); }
-.reticle { z-index: 1; width: 18px; height: 18px; border: 1px solid var(--line-strong); border-radius: 50%; box-shadow: 0 0 0 6px var(--canvas); }
-.viewport-empty p { position: absolute; bottom: 28px; margin: 0; color: var(--faint); font: 10px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+.sensor-grid { min-height: 470px; display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(250px, .75fr); }
+.sensor-panel { min-width: 0; display: flex; flex-direction: column; }
+.sensor-panel + .sensor-panel { border-left: 1px solid var(--line); }
+.sensor-surface { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #fff; }
+.camera-surface { display: grid; place-items: center; }
+.camera-surface::before { content: ""; position: absolute; inset: 50% 0 auto; border-top: 1px solid var(--line); }
+.camera-surface::after { content: ""; position: absolute; inset: 0 auto 0 50%; border-left: 1px solid var(--line); }
+.camera-surface canvas { z-index: 1; display: none; width: 100%; height: 100%; object-fit: contain; background: #111; }
+.camera-surface canvas.visible { display: block; }
+.camera-surface p { z-index: 0; margin: 0; padding: 7px 9px; background: var(--canvas); color: var(--faint); font: 10px/1 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+.camera-surface p.hidden { display: none; }
+.lidar-surface canvas { width: 100%; height: 100%; display: block; }
 .viewport-foot { border-top: 1px solid var(--line); border-bottom: 0; }
 .control-deck { padding: 18px; }
 .deck-title { display: flex; align-items: center; justify-content: space-between; padding-bottom: 17px; border-bottom: 1px solid var(--line); }
@@ -123,6 +129,7 @@ main { grid-column: 2; min-width: 0; }
   .battery { grid-column: 2; }
   .row-arrow { grid-column: 3; grid-row: 1 / span 3; }
   .detail-columns, .cockpit-grid { grid-template-columns: 1fr; gap: 46px; }
+  .sensor-grid { grid-template-columns: minmax(0, 1fr) 280px; }
 }
 
 @media (max-width: 560px) {
@@ -132,7 +139,10 @@ main { grid-column: 2; min-width: 0; }
   .detail-columns { margin-top: 42px; }
   .metric { grid-template-columns: 110px 1fr; }
   .cockpit-grid { border-inline: 0; }
-  .viewport-empty { min-height: 330px; }
+  .sensor-grid { grid-template-columns: 1fr; }
+  .sensor-panel + .sensor-panel { border-left: 0; border-top: 1px solid var(--line); }
+  .sensor-surface { min-height: 330px; }
+  .lidar-surface { min-height: 280px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
