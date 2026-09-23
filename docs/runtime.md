@@ -36,3 +36,17 @@ The on-robot engine is a loopback-only HTTP runtime. The HTTP interface, audio s
 `GET /v1/telemetry/battery` returns the engine's latest ROS `/power/Battery` and `/power/ChargeState` observations. The telemetry component reconnects independently of HTTP and audio, and atomically persists its last state to `/data/alfred/state/battery.json`.
 
 `POST /v1/audio/play` streams an Ogg body into bounded `/tmp` storage and then invokes the native audio daemon. The firmware playback interface is file-oriented, so playback begins after the complete clip arrives. Up to eight recent clips are retained for asynchronous native playback and older clips are removed automatically.
+
+## Cockpit speech
+
+Cockpit has a text box and Speak action. HQ Settings persists Daniel (male, British English) or Samantha (female, American English) on this Mac in `artifacts/hq/speech.json`. HQ uses the existing `runtime/alfred.py say` path; macOS synthesizes, and the robot’s native audio engine plays the clip. Daniel playback submission and saved-setting reload were verified.
+
+Native investigation: `speech_tts` reads `/data/config/speech/tts.json` and supports junhao, duxiaowen, duxiaoxian, duxiaoduo and duxiaoqiao. This robot lacks `/data/config/speech/quadruples.json`; a native synthesis probe returned exit 255 (missing Baidu credentials). No native voice gender or working native synthesis is claimed. Its BusyBox timeout syntax is `timeout -t 12`, now corrected in the runtime.
+
+Boot ordering: the stock ROS master can start after Alfred’s /data hook. Drive publisher registration now retries every second with a one-second RPC timeout, retaining its listeners instead of terminating the engine. Observed and recovered after the September 23 boot; a subsequent physical reboot remains the end-to-end autostart check.
+
+Cockpit shows front bumper states via HQ `GET /api/bots/alfred/bumpers` and engine `GET /v1/telemetry/bumpers`. The engine subscribes to `/onOffInfo/OnOffInfo` (TYPE_BUMP=0), decoding bits 0/1 as left/right from the firmware BumpValue indices. HQ polls every 250 ms; readings older than 2 seconds become unknown/stale. Physical left/right press mapping still needs confirmation. This is telemetry, not a new automatic collision-stop feature.
+
+Diagnostics: each log retains the newest complete records within 10 KiB. HQ: `artifacts/hq/diagnostics.log` (connection transitions, boot IDs, HTTP transport and microphone failures; no chat/audio payloads). Robot: `/data/alfred/logs/engine.log` and `/data/alfred/logs/adb.log` (boot IDs, child PIDs, output and exit codes), retained across boots by `setup/rolling_log.py`. All setup/deploy paths install the logger. HQ still starts when the robot is offline. Read device logs with `python3 runtime/alfred.py shell 'cat /data/alfred/logs/adb.log /data/alfred/logs/engine.log'`.
+
+Native startup greeting: `python3 setup/startup_sound.py --preview` installs Daniel saying “Hello, my good sir.” A persistent clip is bind-mounted over `/media/music/ZH/0.ogg` by Alfred's autostart hook, before the stock boot player runs; no HQ/network dependency or rootfs flash. Original saved at `/data/alfred/backups/startup-original.ogg`; `python3 setup/startup_sound.py --restore` disables the overlay. Stock OTA/watchdog-boot suppression still applies. Installed path/checksums and playback verified; next normal power-on verifies the full boot sequence.

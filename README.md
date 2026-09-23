@@ -61,6 +61,7 @@ HTTP interface:
 - `GET /v1/telemetry/battery`
 - `GET /v1/telemetry/lidar`
 - `GET /v1/camera/frame` (JPEG with frame metadata headers)
+- `GET /v1/drive/settings` and `PUT /v1/drive/settings`: persistent `max_speed_mm_s` and `turn_speed_mm_s`.
 - `PUT /v1/drive` (`linear` and `angular`, each from -1 to 1)
 - `POST /v1/drive/stop`
 - `POST /v1/audio/play` with an `audio/ogg` body and `Content-Length`
@@ -85,3 +86,9 @@ The Mac's default libusb ADB backend fails with this robot; tools set `ADB_LIBUS
 Wi-Fi passwords and private ADB keys are not stored in this project. The robot trusts the existing Mac ADB public key in `/data/misc/adb/adb_keys`. Network ADB uses key authentication on TCP 5555; keep it on the local network.
 
 See [setup and recovery](docs/setup.md) for boot persistence status and rollback.
+
+Cockpit → Drive → Settings adjusts maximum forward/reverse and turning speeds. Defaults are 300 and 180 mm/s; both accept positive finite speeds without a fixed application ceiling. Values persist in `/data/alfred/state/drive.json`. Opening settings stops driving and disables drive hotkeys while the modal is open. Shift immediately selects full throttle; normal input ramps to the same configured limit. The 350 ms deadman remains active.
+
+The robot may sleep while Cockpit is idle. Holding a drive control checks and wakes the firmware using a zero-motion remote STOP before accepting motion. This recovers the wheel/LIDAR sleep outage. Probe details: `docs/motor-investigation.md`.
+
+Diagonal drive keeps the outside wheel at the requested travel speed and reduces the inside wheel by up to 75%; equal arrow-key axes produce a 25%/100% wheel split throughout the throttle ramp. The turn-speed setting controls in-place rotation.
