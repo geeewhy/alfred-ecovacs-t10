@@ -16,14 +16,16 @@ class AudioEngine:
     def play(self,source):
         with tempfile.TemporaryDirectory() as temp:
             clip=pathlib.Path(temp)/'clip.ogg'
-            subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(source),'-ar','16000','-ac','1','-c:a','libvorbis',str(clip)],check=True)
+            subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(source),'-ar','16000','-ac','1','-c:a','libvorbis',str(clip)],check=True,timeout=15)
             return EngineClient(self.robot).play_ogg(clip)
     def say(self,text,voice='Samantha',backend='mac'):
         if backend=='native':
             # Explicit opt-in: this binary calls Baidu's network TTS endpoint.
-            return self.robot.shell('timeout 12 speech_tts '+shlex.quote(text),timeout=15)
+            return self.robot.shell('timeout -t 12 speech_tts '+shlex.quote(text),timeout=15)
         if backend!='mac':raise ValueError('Unknown speech backend')
         with tempfile.TemporaryDirectory() as temp:
             source=pathlib.Path(temp)/'speech.aiff'
-            subprocess.run(['say','-v',voice,'-o',str(source),text],check=True)
+            words=pathlib.Path(temp)/'text.txt'
+            words.write_text(text)
+            subprocess.run(['say','-v',voice,'-o',str(source),'-f',str(words)],check=True,timeout=15)
             return self.play(source)

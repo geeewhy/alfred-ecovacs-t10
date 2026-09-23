@@ -32,7 +32,8 @@ class Robot:
         if digest!=hashlib.md5(data).hexdigest():raise RuntimeError('Upload checksum mismatch')
     def play(self,path):
         payload=json.dumps({'fileList':[{'path':path}],'audioType':3},separators=(',',':'))
-        result=self.shell('netmon_ctl -s /tmp/audio_daemon.sock -j '+shlex.quote(payload))
+        # netmon_ctl can return a nonzero playback ID despite a successful JSON reply.
+        result=self.shell('netmon_ctl -s /tmp/audio_daemon.sock -j '+shlex.quote(payload)+' || true')
         if json.loads(result)['ret']!='ok':raise RuntimeError(result)
         return result
 
