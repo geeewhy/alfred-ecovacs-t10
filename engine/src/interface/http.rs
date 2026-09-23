@@ -1,6 +1,7 @@
 use crate::components::audio::AudioService;
+use crate::components::bumpers::BumperTelemetry;
 use crate::components::camera::CameraTelemetry;
-use crate::components::drive::{DriveService, DriveState, DriveVector};
+use crate::components::drive::{DriveService, DriveSettings, DriveState, DriveVector};
 use crate::components::lidar::{LidarScan, LidarTelemetry};
 use crate::components::telemetry::{BatteryStatus, BatteryTelemetry};
 use axum::body::Body;
@@ -24,6 +25,7 @@ struct HttpState {
     lidar: Arc<LidarTelemetry>,
     camera: Arc<CameraTelemetry>,
     drive: Arc<DriveService>,
+    bumpers: Arc<BumperTelemetry>,
 }
 
 #[derive(Serialize)]
@@ -39,6 +41,7 @@ pub struct HttpRuntime {
     lidar: Arc<LidarTelemetry>,
     camera: Arc<CameraTelemetry>,
     drive: Arc<DriveService>,
+    bumpers: Arc<BumperTelemetry>,
 }
 
 impl HttpRuntime {
@@ -49,6 +52,7 @@ impl HttpRuntime {
         lidar: Arc<LidarTelemetry>,
         camera: Arc<CameraTelemetry>,
         drive: Arc<DriveService>,
+        bumpers: Arc<BumperTelemetry>,
     ) -> Self {
         Self {
             address: address.into(),
@@ -57,6 +61,7 @@ impl HttpRuntime {
             lidar,
             camera,
             drive,
+            bumpers,
         }
     }
 
@@ -67,14 +72,21 @@ impl HttpRuntime {
             lidar: self.lidar,
             camera: self.camera,
             drive: self.drive,
+            bumpers: self.bumpers,
         };
         let app = Router::new()
             .route("/health", get(health))
             .route("/v1/telemetry/battery", get(battery))
+            .route("/v1/telemetry/bumpers", get(bumpers))
             .route("/v1/telemetry/lidar", get(lidar))
             .route("/v1/camera/frame", get(camera_frame))
             .route("/v1/drive", put(drive))
+            .route(
+                "/v1/drive/settings",
+                get(drive_settings).put(save_drive_settings),
+            )
             .route("/v1/drive/stop", post(stop_drive))
+            .route("/v1/drive/wake", post(wake_drive))
             .route("/v1/audio/play", post(play))
             .route("/v1/audio/stock/{number}", post(stock))
             .route("/v1/audio/volume/{percent}", put(volume))
@@ -139,6 +151,17 @@ async fn drive(
     Json(vector): Json<DriveVector>,
 ) -> Result<Json<DriveResponse>, (StatusCode, Json<ApiResponse>)> {
     drive_result(state.drive.command(vector).await)
+}
+
+async fn wake_drive(
+    State(state): State<HttpState>,
+) -> Result<Json<ApiResponse>, (StatusCode, Json<ApiResponse>)> {
+    state
+        .drive
+        .ensure_awake()
+        .await
+        .map_err(|message| failure(StatusCode::SERVICE_UNAVAILABLE, message))?;
+    Ok(success("Robot awake".into()))
 }
 
 async fn stop_drive(
@@ -211,4 +234,31 @@ fn failure(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<
             result: message.into(),
         }),
     )
+}
+
+#[derive(Serialize)]
+struct DriveSettingsResponse {
+    ok: bool,
+    result: DriveSettings,
+}
+async fn drive_settings(State(state): State<HttpState>) -> Json<DriveSettingsResponse> {
+    Json(DriveSettingsResponse {
+        ok: true,
+        result: state.drive.settings().await,
+    })
+}
+async fn save_drive_settings(
+    State(state): State<HttpState>,
+    Json(settings): Json<DriveSettings>,
+) -> Result<Json<DriveSettingsResponse>, (StatusCode, Json<ApiResponse>)> {
+    state
+        .drive
+        .save_settings(settings)
+        .await
+        .map(|result| Json(DriveSettingsResponse { ok: true, result }))
+        .map_err(|e| failure(StatusCode::BAD_REQUEST, e))
+}
+
+async fn bumpers(State(state): State<HttpState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({"ok": true, "result": state.bumpers.current()}))
 }

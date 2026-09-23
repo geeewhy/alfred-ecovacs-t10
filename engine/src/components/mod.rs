@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod bumpers;
 pub mod camera;
 pub mod clips;
 pub mod drive;
