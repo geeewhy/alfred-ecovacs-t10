@@ -1,9 +1,15 @@
+import { VoiceService } from "../bot/voice-service.mjs";
+import { ChatService } from "../bot/chat-service.mjs";
+import { SpeechService } from "../bot/speech-service.mjs";
 import { createServer } from "node:http";
 import { json, staticFile } from "./responses.mjs";
 
 export class HqServer {
   constructor(config, statusService, engineClient) {
     this.config = config;
+    this.speech = new SpeechService();
+    this.chat = new ChatService(this.speech);
+    this.voice = new VoiceService(this.chat, this.speech);
     this.statusService = statusService;
     this.engineClient = engineClient;
     this.server = createServer(this.handle.bind(this));
@@ -12,6 +18,33 @@ export class HqServer {
   async handle(request, response) {
     const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
 
+    if (url.pathname === "/api/bots/alfred/chat/models" && request.method === "GET") {
+      try { return json(response, 200, { ok: true, result: await this.chat.catalog() }); }
+      catch (error) { return json(response, 503, { ok: false, error: error.message }); }
+    }
+    if (url.pathname === "/api/bots/alfred/chat" || url.pathname === "/api/bots/alfred/chat/settings") {
+      try {
+        let result;
+        if (request.method === "GET") result = await this.chat.current();
+        else if (request.method === "PUT" && url.pathname.endsWith("/settings")) result = await this.chat.settings(await readJson(request));
+        else if (request.method === "POST" && !url.pathname.endsWith("/settings")) result = await this.chat.send((await readJson(request)).text);
+        else return json(response, 405, { ok: false, error: "Method not allowed" });
+        if (request.method === "PUT") this.voice.reset();
+        return json(response, 200, { ok: true, result: { ...result, microphone: this.voice.state } });
+      } catch (error) { return json(response, 400, { ok: false, error: error.message }); }
+    }
+
+    if (url.pathname === "/api/bots/alfred/speech/settings" && ["GET", "PUT"].includes(request.method)) {
+      try {
+        const result = request.method === "GET" ? await this.speech.settings() : await this.speech.save(await readJson(request));
+        return json(response, 200, { ok: true, result });
+      } catch (error) { return json(response, 400, { ok: false, error: error.message }); }
+    }
+    if (url.pathname === "/api/bots/alfred/speech" && request.method === "POST") {
+      try { return json(response, 200, { ok: true, result: await this.speech.say((await readJson(request)).text) }); }
+      catch (error) { return json(response, 400, { ok: false, error: error.message }); }
+    }
+
     if (request.method === "GET" && url.pathname === "/api/bots") {
       const robot = await this.statusService.current();
       return json(response, 200, { robots: [robot] });
@@ -19,6 +52,11 @@ export class HqServer {
 
     if (request.method === "GET" && url.pathname === "/api/health") {
       return json(response, 200, { ok: true, service: "hq", version: "0.1.0" });
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/bots/alfred/bumpers") {
+      try { return json(response, 200, await this.engineClient.bumpers()); }
+      catch (error) { return json(response, 503, { ok: false, error: error.message }); }
     }
 
     if (request.method === "GET" && url.pathname === "/api/bots/alfred/lidar") {
@@ -49,10 +87,32 @@ export class HqServer {
       return;
     }
 
+    if (["GET", "PUT"].includes(request.method) && url.pathname === "/api/bots/alfred/drive/settings") {
+      try {
+        const options = request.method === "PUT" ? {
+          method: "PUT", headers: { "content-type": "application/json" },
+          body: JSON.stringify(await readJson(request)),
+        } : {};
+        const upstream = await this.engineClient.request("/v1/drive/settings", 3000, options);
+        return json(response, upstream.status, await upstream.json());
+      } catch (error) {
+        return json(response, 503, { ok: false, error: error.message });
+      }
+    }
+
     if (request.method === "PUT" && url.pathname === "/api/bots/alfred/drive") {
       try {
         const vector = await readJson(request);
         return json(response, 200, await this.engineClient.drive(vector));
+      } catch (error) {
+        return json(response, 503, { ok: false, error: error.message });
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/bots/alfred/drive/wake") {
+      try {
+        const upstream = await this.engineClient.request("/v1/drive/wake", 1500, { method: "POST" });
+        return json(response, upstream.status, await upstream.json());
       } catch (error) {
         return json(response, 503, { ok: false, error: error.message });
       }

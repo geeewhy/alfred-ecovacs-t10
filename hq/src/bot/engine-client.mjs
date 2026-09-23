@@ -1,3 +1,4 @@
+import { diagnosticState } from "../infra/diagnostics.mjs";
 export class EngineClient {
   constructor(adbClient, localPort, remotePort = 8765) {
     this.adbClient = adbClient;
@@ -8,6 +9,12 @@ export class EngineClient {
 
   async connect() {
     await this.adbClient.forward(this.localPort, this.remotePort);
+  }
+
+  async bumpers() {
+    const response = await this.request("/v1/telemetry/bumpers");
+    if (!response.ok) throw new Error(`engine returned ${response.status}`);
+    return response.json();
   }
 
   async lidar() {
@@ -26,7 +33,10 @@ export class EngineClient {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(vector),
     });
-    if (!response.ok) throw new Error(`engine returned ${response.status}`);
+    if (!response.ok) {
+      const result = await response.json();
+      throw new Error(result.message ?? result.error ?? `engine returned ${response.status}`);
+    }
     return response.json();
   }
 
@@ -40,12 +50,15 @@ export class EngineClient {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await fetch(`${this.baseUrl}${path}`, {
+      const response = await fetch(`${this.baseUrl}${path}`, {
         ...options,
         cache: "no-store",
         signal: controller.signal,
       });
+      diagnosticState("engine-http", "connected");
+      return response;
     } catch (error) {
+      diagnosticState("engine-http", "unreachable", { error: error.message });
       await this.connect();
       return fetch(`${this.baseUrl}${path}`, {
         ...options,

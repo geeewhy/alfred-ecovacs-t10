@@ -82,23 +82,23 @@ main { grid-column: 2; min-width: 0; }
 .cockpit-content { height: calc(100vh - 53px); padding-top: 24px; padding-bottom: 24px; display: flex; flex-direction: column; }
 .cockpit-heading { flex: none; display: flex; flex-direction: column; margin-bottom: 18px; }
 .cockpit-heading .eyebrow { margin-bottom: 10px; }
-.cockpit-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(560px, 1fr) 280px; gap: 1px; background: var(--line); border: 1px solid var(--line); }
+.cockpit-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(560px, 1fr) 280px; grid-template-rows: minmax(0, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); }
 .viewport, .control-deck { min-height: 0; background: var(--canvas); }
 .viewport { display: flex; flex-direction: column; }
-.viewport-head, .viewport-foot { height: 43px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.viewport-head, .viewport-foot { flex-shrink: 0; height: 43px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .viewport-head code, .viewport-foot { color: var(--faint); font: 10px/1 var(--mono); }
-.sensor-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(250px, .75fr); }
-.sensor-panel { min-width: 0; display: flex; flex-direction: column; }
+.sensor-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(250px, .75fr); grid-template-rows: minmax(0, 1fr); }
+.sensor-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .sensor-panel + .sensor-panel { border-left: 1px solid var(--line); }
 .sensor-surface { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #fff; }
 .camera-surface { display: grid; place-items: center; }
 .camera-surface::before { content: ""; position: absolute; inset: 50% 0 auto; border-top: 1px solid var(--line); }
 .camera-surface::after { content: ""; position: absolute; inset: 0 auto 0 50%; border-left: 1px solid var(--line); }
-.camera-surface canvas { z-index: 1; display: none; width: 100%; height: 100%; object-fit: contain; background: #111; }
+.camera-surface canvas { position: absolute; inset: 0; object-position: center; z-index: 1; display: none; width: 100%; height: 100%; object-fit: contain; background: #111; }
 .camera-surface canvas.visible { display: block; }
 .camera-surface p { z-index: 0; margin: 0; padding: 7px 9px; background: var(--canvas); color: var(--faint); font: 10px/1 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
 .camera-surface p.hidden { display: none; }
-.lidar-surface canvas { width: 100%; height: 100%; display: block; }
+.lidar-surface canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .viewport-foot { border-top: 1px solid var(--line); border-bottom: 0; }
 .control-deck { padding: 18px; display: flex; flex-direction: column; overflow: hidden; }
 .deck-title { display: flex; align-items: center; justify-content: space-between; padding-bottom: 17px; border-bottom: 1px solid var(--line); }
@@ -152,7 +152,7 @@ main { grid-column: 2; min-width: 0; }
   .cockpit-grid { border-inline: 0; }
   .cockpit-content { height: auto; }
   .cockpit-grid { display: block; }
-  .sensor-grid { grid-template-columns: 1fr; }
+  .sensor-grid { grid-template-columns: 1fr; grid-template-rows: auto; }
   .sensor-panel + .sensor-panel { border-left: 0; border-top: 1px solid var(--line); }
   .sensor-surface { min-height: 330px; }
   .lidar-surface { min-height: 280px; }
@@ -161,3 +161,67 @@ main { grid-column: 2; min-width: 0; }
 @media (prefers-reduced-motion: reduce) {
   * { transition-duration: 0.01ms !important; }
 }
+
+.settings-button { padding: 7px 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--canvas); color: var(--ink); cursor: pointer; font-size: 12px; }
+.settings-button:hover { background: var(--surface); border-color: var(--line-strong); }
+.settings-button:focus-visible, .settings-input input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.settings-button:disabled { opacity: .5; cursor: default; }
+.settings-button.primary { background: var(--accent); color: var(--canvas); border-color: var(--accent); }
+#drive-settings { width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); color: var(--ink); box-shadow: 0 16px 60px oklch(0.22 0.012 255 / .18); }
+#drive-settings::backdrop { background: oklch(0.22 0.012 255 / .32); }
+.settings-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-heading h2 { margin: 0; font-size: 18px; }
+.settings-description { color: var(--muted); font-size: 13px; line-height: 1.5; }
+#settings-fields { border: 0; padding: 8px 0 0; margin: 0; }
+#settings-fields label { display: block; font-size: 13px; font-weight: 600; margin: 16px 0 8px; }
+#settings-fields label span { display: block; color: var(--muted); font-size: 12px; font-weight: 400; margin-top: 4px; }
+.settings-input { display: flex; align-items: center; gap: 10px; }
+.settings-input input { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--canvas); color: var(--ink); padding: 10px; font: 14px var(--mono); }
+.settings-input span { color: var(--muted); white-space: nowrap; font: 12px var(--mono); }
+#settings-message { min-height: 32px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.settings-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+
+.speech-form { margin-top: 18px; }
+.speech-form label, .voice-settings-form label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+.speech-form textarea, .voice-settings-form select { width: 100%; padding: 9px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--canvas); color: var(--ink); font: inherit; font-size: 13px; }
+.speech-form textarea { resize: vertical; min-height: 56px; max-height: 100px; }
+.speech-form textarea:focus-visible, .voice-settings-form select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.speech-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+.speech-actions a { color: var(--muted); font-size: 11px; }
+#speech-status, #voice-status { min-height: 16px; margin: 8px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.voice-settings-form { max-width: 440px; }
+.voice-settings-form h2 { font-size: 18px; margin-bottom: 24px; }
+.control-deck { overflow-y: auto; }
+
+.control-deck .dpad { margin-top: 18px; margin-bottom: 18px; }
+.chat-controls, .chat-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.chat-controls label, .chat-toolbar label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12px; white-space: nowrap; }
+.chat-controls input, .chat-toolbar input { accent-color: var(--accent); }
+#alfred-chat { width: min(680px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); color: var(--ink); }
+#alfred-chat::backdrop { background: oklch(0.22 0.012 255 / .32); }
+.chat-toolbar { margin-top: 18px; color: var(--muted); font-size: 12px; }
+#chat-messages { height: min(420px, 48dvh); overflow-y: auto; border-block: 1px solid var(--line); padding: 4px 0; }
+.chat-message { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.chat-message strong { font-size: 12px; }
+.chat-message.alfred strong { color: var(--accent); }
+.chat-message p { font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
+.chat-message small, .chat-empty, #chat-pending { color: var(--muted); font-size: 12px; }
+#chat-pending { min-height: 18px; }
+#chat-compose { display: flex; gap: 10px; align-items: flex-end; }
+#chat-text { flex: 1; min-width: 0; padding: 10px; resize: vertical; max-height: 120px; font: inherit; font-size: 14px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--canvas); color: var(--ink); }
+#chat-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.agent-settings-form { margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--line); }
+.agent-settings-form select { margin-bottom: 18px; }
+.microphone-status { font-size: 11px; color: var(--muted); margin: 0 0 10px; }
+.microphone-status:empty { display: none; }
+
+.bumper-strip { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; flex: 0 0 auto; padding: 10px 14px; border-top: 1px solid var(--line); font-size: 12px; }
+.bumper-strip > span:first-child { color: var(--muted); }
+.bumper-strip small { margin-left: auto; color: var(--muted); font: 10px var(--mono); }
+.bumper-reading { font-weight: 500; }
+.bumper-reading::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--line-strong); }
+.bumper-reading[data-state="clear"]::before { background: oklch(0.63 0.14 155); }
+.bumper-reading[data-state="pressed"] { color: oklch(0.48 0.17 30); }
+.bumper-reading[data-state="pressed"]::before { background: currentColor; }
+.bumper-reading[data-state="unknown"] { color: var(--muted); }

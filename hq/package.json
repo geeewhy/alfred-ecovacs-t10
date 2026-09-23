@@ -10,5 +10,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "polygon-clipping": "^0.15.7"
   }
 }

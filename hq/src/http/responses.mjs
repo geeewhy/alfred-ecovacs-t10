@@ -17,7 +17,7 @@ export function json(response, status, body) {
 }
 
 export async function staticFile(response, publicDirectory, pathname) {
-  const requested = pathname === "/" || pathname === "/cockpit" ? "index.html" : pathname.slice(1);
+  const requested = ["/", "/cockpit", "/settings"].includes(pathname) ? "index.html" : pathname.slice(1);
   const absolute = path.resolve(publicDirectory, requested);
   if (!absolute.startsWith(`${path.resolve(publicDirectory)}${path.sep}`)) return false;
 
@@ -26,7 +26,7 @@ export async function staticFile(response, publicDirectory, pathname) {
     const body = await readFile(absolute);
     response.writeHead(200, {
       "Content-Type": MIME[path.extname(absolute)] ?? "application/octet-stream",
-      "Cache-Control": pathname.endsWith(".html") || pathname === "/" ? "no-cache" : "public, max-age=60",
+      "Cache-Control": "no-cache",
     });
     response.end(body);
     return true;

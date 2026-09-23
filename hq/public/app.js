@@ -15,6 +15,7 @@ function shell(content, active) {
         <nav aria-label="Primary">
           <a class="nav-item ${active === "home" ? "active" : ""}" href="/" data-route>${icons.home}<span>Home</span></a>
           <a class="nav-item ${active === "cockpit" ? "active" : ""}" href="/cockpit" data-route>${icons.cockpit}<span>Cockpit</span></a>
+          <a class="nav-item ${active === "settings" ? "active" : ""}" href="/settings" data-route>${icons.robot}<span>Settings</span></a>
         </nav>
         <div class="rail-foot"><span class="local-mark"></span><span>Local</span></div>
       </aside>
@@ -120,10 +121,13 @@ function cockpit(robot) {
               <div class="sensor-surface lidar-surface"><canvas id="lidar-canvas"></canvas></div>
             </section>
           </div>
+          <div class="bumper-strip" aria-label="Front bumpers" role="status">
+            <span>Front bumpers</span><span id="bumper-left" class="bumper-reading" data-state="unknown">Left · Waiting</span><span id="bumper-right" class="bumper-reading" data-state="unknown">Right · Waiting</span><small id="bumper-status">CONNECTING</small>
+          </div>
           <div class="viewport-foot"><span>DBX53</span><span>${robot?.network?.address ?? "192.168.1.89"}</span><span>${robot?.system?.temperatureC ?? "—"} °C</span></div>
         </section>
         <aside class="control-deck">
-          <div class="deck-title"><h2>Drive</h2><span id="drive-status">Ready</span></div>
+          <div class="deck-title"><h2>Drive</h2><button class="settings-button" id="open-drive-settings" type="button">Settings</button><span id="drive-status">Ready</span></div>
           <div class="dpad">
             ${controlButton("Forward", "↑", "forward")}
             ${controlButton("Left", "←", "left")}
@@ -135,10 +139,202 @@ function cockpit(robot) {
             <div><span>Throttle</span><strong id="drive-throttle">0%</strong></div>
             <div><span>Wheels L / R</span><strong id="drive-wheels">0 / 0 mm/s</strong></div>
           </div>
-          <div class="deck-note"><strong>Hold to drive</strong><p>Use arrow keys or the controls. Speed ramps while held. Hold Shift for full speed; release any direction to stop it. The engine dead-man stops stale commands.</p></div>
+          <form id="speech-form" class="speech-form">
+            <div class="chat-controls"><label><input type="checkbox" id="chat-mode"> Chat mode</label><button type="button" class="settings-button" id="chat-history">History</button></div>
+            <p id="microphone-status" class="microphone-status" role="status"></p>
+            <label for="speech-text" id="speech-label">Say something</label>
+            <textarea id="speech-text" rows="2" maxlength="1000" required placeholder="How can I help you, my good sir?"></textarea>
+            <div class="speech-actions"><a href="/settings" data-route>Voice settings</a><button class="settings-button primary" id="speak-button" type="submit">Speak</button></div>
+            <p id="speech-status" role="status"></p>
+          </form>
+          <div class="deck-note"><strong>Hold to drive</strong><p>Arrows to drive · Shift for full speed · Release to stop.</p></div>
         </aside>
       </div>
-    </div>`, "cockpit");
+    </div>
+    <dialog id="alfred-chat" aria-labelledby="chat-title">
+      <header class="settings-heading"><h2 id="chat-title">You & Alfred</h2><button class="settings-button" id="close-chat" aria-label="Close conversation">✕</button></header>
+      <div class="chat-toolbar"><span id="chat-session-status">Haicue session</span><label><input type="checkbox" id="chat-speaker"> Speaker output</label></div>
+      <div id="chat-messages" role="log" aria-live="polite"></div>
+      <p id="chat-pending" role="status"></p>
+      <form id="chat-compose"><label class="sr-only" for="chat-text">Message Alfred</label><textarea id="chat-text" rows="2" maxlength="1000" placeholder="Ask Alfred…" required></textarea><button id="chat-send" class="settings-button primary">Send</button></form>
+    </dialog>
+    <dialog id="drive-settings" aria-labelledby="settings-title">
+      <form id="drive-settings-form">
+        <header class="settings-heading"><h2 id="settings-title">Drive settings</h2><button type="button" id="close-drive-settings" class="settings-button" aria-label="Close settings">✕</button></header>
+        <p class="settings-description">Set full-throttle speeds. Shift reaches these limits immediately.</p>
+        <fieldset id="settings-fields" disabled>
+          <label for="max-speed">Maximum speed <span>Forward and reverse</span></label>
+          <div class="settings-input"><input id="max-speed" name="max_speed_mm_s" type="number" min="0" step="any" required><span>mm/s</span></div>
+          <label for="turn-speed">Turning speed <span>Wheel speed when turning in place</span></label>
+          <div class="settings-input"><input id="turn-speed" name="turn_speed_mm_s" type="number" min="0" step="any" required><span>mm/s</span></div>
+          <p class="settings-description">Enter positive speeds in mm/s.</p>
+        </fieldset>
+        <p id="settings-message" role="status" aria-live="polite">Loading settings…</p>
+        <footer class="settings-actions"><button type="button" id="cancel-drive-settings" class="settings-button">Cancel</button><button type="submit" id="save-drive-settings" class="settings-button primary" disabled>Save on robot</button></footer>
+      </form>
+    </dialog>`, "cockpit");
+}
+
+function settingsPage() {
+  return shell(`<div class="content settings-page"><section class="heading"><p class="eyebrow">ALFRED</p><h1>Settings</h1></section>
+    <form id="voice-settings-form" class="voice-settings-form"><h2>Speech</h2>
+      <label for="speech-voice">Voice</label><select id="speech-voice" disabled><option>Loading…</option></select>
+      <p class="settings-description">Used when Alfred speaks text from Cockpit. Saved on this Mac.</p>
+      <button class="settings-button primary" id="save-voice" disabled>Save voice</button>
+      <p id="voice-status" role="status"></p>
+    </form>
+    <form id="agent-settings-form" class="voice-settings-form agent-settings-form"><h2>Haicue</h2>
+      <label for="chat-agent">Agent</label><select id="chat-agent" disabled></select>
+      <label for="chat-model">Model</label><select id="chat-model" disabled></select>
+      <p class="settings-description">Changing agent or model starts a new Alfred session on your next message. Conversation history stays here.</p>
+      <button class="settings-button primary" id="save-agent" disabled>Save agent</button><p id="agent-status" role="status">Loading available models…</p>
+    </form></div>`, "settings");
+}
+
+async function startVoiceSettings() {
+  const form = document.querySelector("#voice-settings-form");
+  const select = form.querySelector("select");
+  const button = form.querySelector("button");
+  const status = form.querySelector("[role=status]");
+  try {
+    const response = await chatFetch("/api/bots/alfred/speech/settings");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    select.replaceChildren(...data.result.voices.map(voice => new Option(voice.label, voice.id)));
+    select.value = data.result.voice; select.disabled = false; button.disabled = false;
+  } catch (error) { status.textContent = error.message; }
+  form.addEventListener("submit", async event => {
+    event.preventDefault(); button.disabled = true; status.textContent = "Saving…";
+    try {
+      const response = await chatFetch("/api/bots/alfred/speech/settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ voice: select.value }) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      status.textContent = "Voice saved";
+    } catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+}
+
+async function startAgentSettings() {
+  const form = document.querySelector("#agent-settings-form");
+  const agent = document.querySelector("#chat-agent"), model = document.querySelector("#chat-model"), button = document.querySelector("#save-agent"), status = document.querySelector("#agent-status");
+  let catalog = {};
+  function fillModels(selected = "") { model.replaceChildren(new Option("Agent default", ""), ...catalog[agent.value].map(id => new Option(id, id))); model.value = selected; }
+  try {
+    const [modelsResponse, stateResponse] = await Promise.all([chatFetch("/api/bots/alfred/chat/models"), chatFetch("/api/bots/alfred/chat/settings")]);
+    const models = await modelsResponse.json(), state = await stateResponse.json();
+    if (!modelsResponse.ok || !stateResponse.ok) throw new Error(models.error || state.error);
+    catalog = models.result; agent.replaceChildren(...Object.keys(catalog).map(id => new Option(id === "codex" ? "Codex" : "Claude", id)));
+    agent.value = state.result.agent; fillModels(state.result.model);
+    agent.disabled = false; model.disabled = false; button.disabled = false; status.textContent = "";
+  } catch (error) { status.textContent = error.message; }
+  agent.onchange = () => fillModels();
+  form.onsubmit = async event => {
+    event.preventDefault(); button.disabled = true; status.textContent = "Saving…";
+    try { await chatSettings({ agent: agent.value, model: model.value }); status.textContent = "Saved for your next conversation"; }
+    catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; }
+  };
+}
+
+function startSpeech() {
+  const form = document.querySelector("#speech-form");
+  const field = form.querySelector("textarea");
+  const button = form.querySelector("#speak-button");
+  const status = form.querySelector("[role=status]");
+  field.addEventListener("focus", () => stopDrive());
+  field.addEventListener("keydown", event => {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    if (!event.repeat && !button.disabled) form.requestSubmit();
+  });
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (button.disabled || !field.value.trim()) return;
+    button.disabled = true; status.textContent = chatState.enabled ? "Sending to Alfred…" : "Preparing speech…";
+    try {
+      const response = await chatFetch(chatState.enabled ? "/api/bots/alfred/chat" : "/api/bots/alfred/speech", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: field.value }) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      if (chatState.enabled) { chatState = data.result; field.value = ""; renderChat(); status.textContent = "Sent to Alfred"; }
+      else status.textContent = data.result.message;
+    } catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+}
+
+let chatState = { enabled: false, speaker: false, messages: [], pending: null };
+let renderedChat = "";
+function renderChat() {
+  const toggle = document.querySelector("#chat-mode");
+  if (!toggle) return;
+  toggle.checked = chatState.enabled;
+  document.querySelector("#microphone-status").textContent = chatState.enabled ? (((chatState.microphone?.message || "Starting robot microphone…") + (chatState.microphone?.meter ? ` Audio level: ${chatState.microphone.meter.rmsPeak}.` : "") + (chatState.microphone?.transcription && !chatState.microphone.transcription.text ? " No words recognized in the last audio segment." : "")) + (chatState.microphone?.lastHeard ? ` Last heard: “${chatState.microphone.lastHeard.text}”${chatState.microphone.lastHeard.accepted ? "" : " (uncertain audio, skipped)"}` : "")) : "";
+  document.querySelector("#chat-speaker").checked = chatState.speaker;
+  document.querySelector("#speech-label").textContent = chatState.enabled ? "Message Alfred" : "Say something";
+  document.querySelector("#speak-button").textContent = chatState.enabled ? "Send" : "Speak";
+  document.querySelector("#chat-send").disabled = !chatState.enabled || !!chatState.pending;
+  document.querySelector("#chat-session-status").textContent = chatState.sessionId ? `Haicue · ${chatState.agent || "codex"}` : "Haicue · Alfred";
+  const pending = chatState.error || chatState.pending?.status || (!chatState.enabled ? "Turn on Chat mode to send messages." : "");
+  document.querySelector("#chat-pending").textContent = pending;
+  if (chatState.enabled) document.querySelector("#speech-status").textContent = pending || (chatState.messages.at(-1)?.role === "alfred" ? "Alfred replied · History" : "");
+  const signature = JSON.stringify(chatState.messages);
+  if (signature === renderedChat) return;
+  renderedChat = signature;
+  const log = document.querySelector("#chat-messages");
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+  log.replaceChildren();
+  if (!chatState.messages.length) { const p = document.createElement("p"); p.className = "chat-empty"; p.textContent = "Your conversation with Alfred will appear here."; log.append(p); }
+  for (const message of chatState.messages) {
+    const row = document.createElement("article"); row.className = "chat-message " + message.role;
+    const label = document.createElement("strong"); label.textContent = message.role === "you" ? "You" : "Alfred";
+    const text = document.createElement("p"); text.textContent = message.text;
+    const meta = document.createElement("small"); meta.textContent = new Date(message.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (message.audio === "failed") meta.textContent += " · Speaker failed: " + message.audioError;
+    if (message.audio === "sending") meta.textContent += " · Preparing speech";
+    if (message.audio === "sent") meta.textContent += " · Sent to speaker";
+    row.append(label, text, meta); log.append(row);
+  }
+  if (nearBottom) log.scrollTop = log.scrollHeight;
+}
+async function chatSettings(change) {
+  const response = await chatFetch("/api/bots/alfred/chat/settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(change) });
+  const data = await response.json(); if (!response.ok) throw new Error(data.error);
+  chatState = data.result; renderChat();
+}
+function startChat(run) {
+  renderedChat = "";
+  const dialog = document.querySelector("#alfred-chat");
+  document.querySelector("#chat-history").onclick = () => { stopDrive(); dialog.showModal(); document.querySelector("#chat-text").focus(); };
+  document.querySelector("#close-chat").onclick = () => dialog.close();
+  dialog.addEventListener("close", () => { stopDrive(); document.querySelector("#chat-history").focus(); });
+  for (const [id, key] of [["chat-mode", "enabled"], ["chat-speaker", "speaker"]]) {
+    document.getElementById(id).onchange = async event => {
+      const field = event.target; field.disabled = true; stopDrive();
+      try { await chatSettings({ [key]: field.checked }); }
+      catch (error) { renderChat(); document.querySelector("#speech-status").textContent = error.message; }
+      finally { field.disabled = false; }
+    };
+  }
+  const form = document.querySelector("#chat-compose"); const field = form.querySelector("textarea");
+  field.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!event.repeat && !document.querySelector("#chat-send").disabled) form.requestSubmit(); } };
+  form.onsubmit = async event => {
+    event.preventDefault(); if (!field.value.trim() || chatState.pending) return;
+    document.querySelector("#chat-send").disabled = true;
+    try {
+      const response = await chatFetch("/api/bots/alfred/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: field.value }) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      field.value = ""; chatState = data.result; renderChat();
+    } catch (error) { document.querySelector("#chat-pending").textContent = error.message; document.querySelector("#chat-send").disabled = false; }
+  };
+  async function poll() {
+    try {
+      const response = await chatFetch("/api/bots/alfred/chat", { cache: "no-store", signal: AbortSignal.timeout(3000) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      if (run !== cockpitRun) return;
+      chatState = data.result; renderChat();
+    } catch (error) { if (run === cockpitRun) document.querySelector("#speech-status").textContent = "Chat unavailable: " + error.message; }
+    if (run === cockpitRun) setTimeout(poll, 1000);
+  }
+  poll();
 }
 
 let robot = null;
@@ -154,7 +350,7 @@ function route() {
   stopDrive();
   const run = ++cockpitRun;
   document.body.classList.toggle("cockpit-mode", location.pathname === "/cockpit");
-  app.innerHTML = location.pathname === "/cockpit" ? cockpit(robot) : home(robot);
+  app.innerHTML = location.pathname === "/cockpit" ? cockpit(robot) : location.pathname === "/settings" ? settingsPage() : home(robot);
   document.querySelectorAll("[data-route]").forEach((link) => link.addEventListener("click", (event) => {
     event.preventDefault();
     history.pushState({}, "", link.href);
@@ -163,7 +359,11 @@ function route() {
   if (location.pathname === "/cockpit") {
     startSensors(run);
     startControls();
+    startDriveSettings();
+    startSpeech();
+    startChat(run);
   }
+  if (location.pathname === "/settings") { startVoiceSettings(); startAgentSettings(); }
 }
 
 function activeDirections() {
@@ -203,15 +403,18 @@ async function sendDrive() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ linear: vector.linear, angular: vector.angular }),
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      const result = await response.json();
+      throw new Error(result.error ?? result.message ?? `HTTP ${response.status}`);
+    }
     const { result } = await response.json();
     if (epoch !== driveEpoch) return;
     renderDrive(result);
     const status = document.querySelector("#drive-status");
     if (status) status.textContent = result.active ? "Driving" : "Ready";
-  } catch {
+  } catch (error) {
     const status = document.querySelector("#drive-status");
-    if (status) status.textContent = "Drive offline";
+    if (status && epoch === driveEpoch) status.textContent = error.message;
   }
 }
 
@@ -219,10 +422,12 @@ function ensureDriveTimer() {
   const directions = activeDirections();
   const active = ["forward", "reverse", "left", "right"].some((direction) => directions.has(direction));
   if (active && !driveStartedAt) driveStartedAt = performance.now();
-  if (active && !driveTimer) {
+  if (active) {
+    // Every key/pointer transition sends the combined held state immediately.
+    driveEpoch += 1;
     sendDrive();
-    driveTimer = setInterval(sendDrive, 100);
-  } else if (!active) {
+    if (!driveTimer) driveTimer = setInterval(sendDrive, 100);
+  } else {
     stopDrive(directions.has("boost"));
   }
 }
@@ -239,9 +444,63 @@ function stopDrive(preserveBoost = false) {
   driveTimer = null;
   lastDriveVector = { linear: 0, angular: 0 };
   renderDrive({ left_mm_s: 0, right_mm_s: 0 });
+  const status = document.querySelector("#drive-status");
+  if (status) status.textContent = "Stopped";
   if (shouldNotify || location.pathname === "/cockpit") {
     fetch("/api/bots/alfred/drive/stop", { method: "POST", keepalive: true }).catch(() => {});
   }
+}
+
+function startDriveSettings() {
+  const dialog = document.querySelector("#drive-settings");
+  const form = document.querySelector("#drive-settings-form");
+  const fields = document.querySelector("#settings-fields");
+  const save = document.querySelector("#save-drive-settings");
+  const message = document.querySelector("#settings-message");
+  const max = document.querySelector("#max-speed");
+  const turn = document.querySelector("#turn-speed");
+  let busy = false;
+  const close = () => { if (!busy) dialog.close(); };
+  document.querySelector("#close-drive-settings").onclick = close;
+  document.querySelector("#cancel-drive-settings").onclick = close;
+  dialog.addEventListener("cancel", (event) => { if (busy) event.preventDefault(); });
+  dialog.addEventListener("close", () => { stopDrive(); document.querySelector("#open-drive-settings")?.focus(); });
+
+  document.querySelector("#open-drive-settings").onclick = async () => {
+    stopDrive();
+    fields.disabled = true; save.disabled = true;
+    message.textContent = "Loading settings…";
+    dialog.showModal();
+    try {
+      const response = await fetch("/api/bots/alfred/drive/settings", { cache: "no-store", signal: AbortSignal.timeout(5000) });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || data.result || "Cannot load settings");
+      if (!dialog.open || !dialog.isConnected) return;
+      max.value = data.result.max_speed_mm_s;
+      turn.value = data.result.turn_speed_mm_s;
+      fields.disabled = false; save.disabled = false;
+      message.textContent = "Saved on the robot, including after restart.";
+      max.focus();
+    } catch (error) { message.textContent = error.message; }
+  };
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (busy || !form.reportValidity()) return;
+    if (Number(max.value) <= 0 || Number(turn.value) <= 0) { message.textContent = "Speeds must be greater than zero."; return; }
+    busy = true; save.disabled = true; fields.disabled = true;
+    message.textContent = "Saving…";
+    try {
+      const response = await fetch("/api/bots/alfred/drive/settings", {
+        method: "PUT", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(5000),
+        body: JSON.stringify({ max_speed_mm_s: Number(max.value), turn_speed_mm_s: Number(turn.value) }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || data.result || "Cannot save settings");
+      dialog.close();
+      document.querySelector("#drive-status").textContent = `Max ${data.result.max_speed_mm_s} mm/s`;
+    } catch (error) { message.textContent = error.message; }
+    finally { busy = false; save.disabled = false; fields.disabled = false; }
+  });
 }
 
 function startControls() {
@@ -266,21 +525,19 @@ function startControls() {
 
 const keyDirections = { ArrowUp: "forward", ArrowDown: "reverse", ArrowLeft: "left", ArrowRight: "right" };
 window.addEventListener("keydown", (event) => {
-  if (location.pathname !== "/cockpit") return;
+  if (location.pathname !== "/cockpit" || document.querySelector("dialog[open]") || event.target.closest("input, textarea, select, [contenteditable]")) return;
   const direction = event.key === "Shift" ? "boost" : keyDirections[event.key];
   if (!direction) return;
   event.preventDefault();
   if (driveKeys.has(direction)) return;
   driveKeys.add(direction);
   ensureDriveTimer();
-  if (direction === "boost" && activeDirections().size > 1) sendDrive();
 });
 window.addEventListener("keyup", (event) => {
   const direction = event.key === "Shift" ? "boost" : keyDirections[event.key];
   if (!direction || !driveKeys.delete(direction)) return;
   event.preventDefault();
-  if (direction === "boost" && activeDirections().size) sendDrive();
-  else ensureDriveTimer();
+  ensureDriveTimer();
 });
 window.addEventListener("blur", () => stopDrive());
 window.addEventListener("pagehide", () => stopDrive());
@@ -336,7 +593,7 @@ function drawLidar(scan) {
 
 async function pollLidar(run) {
   try {
-    const response = await fetch("/api/bots/alfred/lidar", { cache: "no-store" });
+    const response = await fetch("/api/bots/alfred/lidar", { cache: "no-store", signal: AbortSignal.timeout(3000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const { result } = await response.json();
     if (run !== cockpitRun) return;
@@ -353,7 +610,7 @@ async function pollLidar(run) {
 
 async function pollCamera(run) {
   try {
-    const response = await fetch("/api/bots/alfred/camera/frame", { cache: "no-store" });
+    const response = await fetch("/api/bots/alfred/camera/frame", { cache: "no-store", signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const width = Number(response.headers.get("x-frame-width"));
     const height = Number(response.headers.get("x-frame-height"));
@@ -382,6 +639,7 @@ async function pollCamera(run) {
 }
 
 function startSensors(run) {
+  pollBumpers(run);
   pollLidar(run);
   pollCamera(run);
 }
@@ -394,6 +652,7 @@ async function refresh() {
   } catch (error) {
     robot = { name: "Alfred", model: "Ecovacs T10 Omni DBX53", online: false, observedAt: new Date().toISOString(), error: error.message };
   }
+  if (location.pathname === "/settings" && document.querySelector(".settings-page")) return;
   if (location.pathname !== "/cockpit" || !document.querySelector(".cockpit-grid")) route();
   else {
     const status = document.querySelector(".top-status");
@@ -405,3 +664,27 @@ window.addEventListener("popstate", route);
 route();
 refresh();
 setInterval(refresh, 5_000);
+
+function chatFetch(url, options = {}) {
+  return fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(15000) });
+}
+
+async function pollBumpers(run) {
+  if (run !== cockpitRun) return;
+  let state;
+  try {
+    const response = await fetch("/api/bots/alfred/bumpers", { cache: "no-store", signal: AbortSignal.timeout(1000) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    state = (await response.json()).result;
+  } catch { state = null; }
+  if (run !== cockpitRun) return;
+  for (const side of ["left", "right"]) {
+    const element = document.querySelector(`#bumper-${side}`);
+    if (!element) return;
+    const known = state?.fresh && typeof state[side] === "boolean";
+    element.dataset.state = known ? (state[side] ? "pressed" : "clear") : "unknown";
+    element.textContent = `${side === "left" ? "Left" : "Right"} · ${known ? (state[side] ? "Pressed" : "Clear") : "Unknown"}`;
+  }
+  document.querySelector("#bumper-status").textContent = !state ? "OFFLINE" : state.fresh ? "LIVE" : "STALE";
+  setTimeout(() => pollBumpers(run), 250);
+}

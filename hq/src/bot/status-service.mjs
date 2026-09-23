@@ -1,3 +1,4 @@
+import { diagnosticState } from "../infra/diagnostics.mjs";
 import { offlineStatus, parseStatus } from "./status-parser.mjs";
 
 const STATUS_COMMAND = String.raw`
@@ -27,8 +28,12 @@ export class RobotStatusService {
     const startedAt = performance.now();
     try {
       const raw = await this.adbClient.shell(STATUS_COMMAND);
-      return parseStatus(raw, this.robot, Math.round(performance.now() - startedAt), observedAt);
+      const status = parseStatus(raw, this.robot, Math.round(performance.now() - startedAt), observedAt);
+      diagnosticState('robot', 'online', { address: this.robot.adbAddress });
+      diagnosticState('boot', status.system?.bootId ?? 'unknown');
+      return status;
     } catch (error) {
+      diagnosticState('robot', 'offline', { error: error.message });
       return offlineStatus(this.robot, error, observedAt);
     }
   }
