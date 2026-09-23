@@ -1,3 +1,4 @@
+import { MapService } from '../maps/map-service.mjs';
 import { VoiceService } from "../bot/voice-service.mjs";
 import { ChatService } from "../bot/chat-service.mjs";
 import { SpeechService } from "../bot/speech-service.mjs";
@@ -7,6 +8,7 @@ import { json, staticFile } from "./responses.mjs";
 export class HqServer {
   constructor(config, statusService, engineClient) {
     this.config = config;
+    this.maps = new MapService(engineClient);
     this.speech = new SpeechService();
     this.chat = new ChatService(this.speech);
     this.voice = new VoiceService(this.chat, this.speech);
@@ -17,6 +19,32 @@ export class HqServer {
 
   async handle(request, response) {
     const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
+
+    if (url.pathname === "/api/maps" || url.pathname.startsWith("/api/maps/")) {
+      try {
+        if(url.pathname === "/api/maps/active" && request.method === "GET") return json(response,200,{ok:true,result:this.maps.summary()});
+        if(url.pathname === "/api/maps/active/pause" && request.method === "POST") return json(response,200,{ok:true,result:await this.maps.pauseActive()});
+        if(url.pathname === "/api/maps/settings") {
+          if(request.method==="GET")return json(response,200,{ok:true,result:(await this.maps.navigation.call("status")).settings});
+          if(request.method==="PUT"){if(this.maps.active?.status.state==="scanning")await this.maps.pauseActive();else await this.maps.navigation.call("pause");return json(response,200,{ok:true,result:await this.maps.navigation.call("settings",await readJson(request))});}
+        }
+        const [, , , id, action] = url.pathname.split("/");
+        let result;
+        if (!id && request.method === "GET") result = await this.maps.list();
+        else if (!id && request.method === "POST") result = await this.maps.create(await readJson(request));
+        else if (id && !action && request.method === "DELETE") result = await this.maps.remove(id);
+        else if (id && !action && request.method === "GET") result = await this.maps.get(id);
+        else if (id && action === "edit" && request.method === "POST") result = await this.maps.edit(id, await readJson(request));
+        else if (id && action === "scan" && request.method === "POST") {
+          const body=await readJson(request), controller=new AbortController();
+          const timer=setTimeout(()=>controller.abort(),12000);
+          response.once('close',()=>{if(!response.writableEnded)controller.abort();});
+          try{result=await this.maps.scan(id,body.action,{...body,signal:controller.signal});}finally{clearTimeout(timer);}
+        }
+        else return json(response, 405, {ok:false,error:"Method not allowed"});
+        return json(response, 200, {ok:true,result});
+      } catch (error) { return json(response, 400, {ok:false,error:error.message}); }
+    }
 
     if (url.pathname === "/api/bots/alfred/chat/models" && request.method === "GET") {
       try { return json(response, 200, { ok: true, result: await this.chat.catalog() }); }
@@ -102,6 +130,7 @@ export class HqServer {
 
     if (request.method === "PUT" && url.pathname === "/api/bots/alfred/drive") {
       try {
+        if(this.maps.exploring) await this.maps.pauseActive();
         const vector = await readJson(request);
         return json(response, 200, await this.engineClient.drive(vector));
       } catch (error) {
@@ -120,6 +149,7 @@ export class HqServer {
 
     if (request.method === "POST" && url.pathname === "/api/bots/alfred/drive/stop") {
       try {
+        await this.maps.stopExploration();
         return json(response, 200, await this.engineClient.stop());
       } catch (error) {
         return json(response, 503, { ok: false, error: error.message });
@@ -142,7 +172,7 @@ async function readJson(request) {
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 4_096) throw new Error("request body too large");
+    if (size > 131_072) throw new Error("request body too large");
     chunks.push(chunk);
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));

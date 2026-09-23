@@ -46,6 +46,8 @@ npm start
 
 Open `http://127.0.0.1:4173`. Home shows live connectivity, battery, firmware, Linux, network, storage, thermal, and service telemetry. Cockpit keeps the live 864×480 front camera and LIDAR point cloud visible while providing hold-to-drive controls for the two powered wheels. Arrow keys ramp speed while held; Shift temporarily selects full speed. Releasing controls or losing HQ communication stops the robot.
 
+Maps adds automatic exploration, saved-map localization, room editing and SVG/PNG export through a local ROS 2 companion. See [mapping setup and verification status](docs/maps.md).
+
 ## Engine
 
 `engine/` is a componentized Rust HTTP runtime deployed to `/data/alfred/alfred-engine`. It binds only to robot loopback and is reached through authenticated ADB forwarding. Its writable autostart integration requires no further firmware changes.

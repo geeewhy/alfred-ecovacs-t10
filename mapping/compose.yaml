@@ -1,0 +1,30 @@
+services:
+  mapping:
+    image: alfred-mapping:jazzy
+    container_name: alfred-mapping
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:48766:8766"
+    environment:
+      ROS_DOMAIN_ID: "42"
+      ALFRED_ENGINE: "http://host.docker.internal:48765"
+    volumes:
+      - ./state:/alfred/state
+      - ./bridge.py:/alfred/bridge.py:ro
+      - ./motion_recovery.py:/alfred/motion_recovery.py:ro
+      - ./localization_seed.py:/alfred/localization_seed.py:ro
+      - ./refinement.py:/alfred/refinement.py:ro
+      - ./scan_geometry.py:/alfred/scan_geometry.py:ro
+      - ./slam_session.py:/alfred/slam_session.py:ro
+      - ./slam-upstream.yaml:/alfred/slam-upstream.yaml:ro
+      - ./configure.py:/alfred/configure.py:ro
+      - ./nav2-upstream.yaml:/alfred/nav2-upstream.yaml:ro
+      - ./navigation.xml:/alfred/navigation.xml:ro
+      - ./explore.yaml:/alfred/explore.yaml:ro
+      - ./start.sh:/alfred/start.sh:ro
+    command: ["bash", "/alfred/start.sh"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10k"
+        max-file: "3"

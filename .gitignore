@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .env
 *.key
+
+mapping/vendor/
+mapping/state/

@@ -1,0 +1,22 @@
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <PipelineSequence>
+      <RateController hz="1.0">
+        <RecoveryNode number_of_retries="2" name="RetryPlanning">
+          <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased" error_code_id="{compute_path_error_code}"/>
+          <Sequence>
+            <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+            <ClearEntireCostmap service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+        </RecoveryNode>
+      </RateController>
+      <RecoveryNode number_of_retries="1" name="RetryController">
+        <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker" error_code_id="{follow_path_error_code}"/>
+        <Sequence>
+          <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+          <ClearEntireCostmap service_name="local_costmap/clear_entirely_local_costmap"/>
+        </Sequence>
+      </RecoveryNode>
+    </PipelineSequence>
+  </BehaviorTree>
+</root>

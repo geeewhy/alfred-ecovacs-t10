@@ -1,0 +1,7 @@
+# Incremental application rebuild, reusing the already installed ROS packages.
+FROM alfred-mapping:jazzy
+WORKDIR /alfred
+COPY graph-export /alfred/graph-export
+RUN . /opt/ros/jazzy/setup.sh && cmake -S graph-export -B /tmp/alfred-graph-build -DCMAKE_BUILD_TYPE=Release && cmake --build /tmp/alfred-graph-build -j2 && cmake --install /tmp/alfred-graph-build && rm -rf /tmp/alfred-graph-build
+COPY . /alfred
+RUN . /opt/ros/jazzy/setup.sh && colcon build --base-paths vendor/m-explore-ros2/explore vendor/m-explore-ros2/explore_lite_msgs --cmake-args -DBUILD_TESTING=OFF

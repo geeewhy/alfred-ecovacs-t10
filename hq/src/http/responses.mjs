@@ -17,7 +17,7 @@ export function json(response, status, body) {
 }
 
 export async function staticFile(response, publicDirectory, pathname) {
-  const requested = ["/", "/cockpit", "/settings"].includes(pathname) ? "index.html" : pathname.slice(1);
+  const requested = ["/", "/cockpit", "/settings", "/maps"].includes(pathname) ? "index.html" : pathname.slice(1);
   const absolute = path.resolve(publicDirectory, requested);
   if (!absolute.startsWith(`${path.resolve(publicDirectory)}${path.sep}`)) return false;
 

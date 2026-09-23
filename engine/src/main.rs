@@ -7,6 +7,7 @@ use components::camera::{CameraTelemetry, NativeCamera};
 use components::clips::TempClipStore;
 use components::drive::DriveService;
 use components::lidar::LidarTelemetry;
+use components::mapping::NativeMapping;
 use components::power::NativeBatterySnapshot;
 use components::telemetry::BatteryTelemetry;
 use interface::http::HttpRuntime;
@@ -28,6 +29,7 @@ async fn main() -> std::io::Result<()> {
     let camera = CameraTelemetry::new(camera_source);
     camera.start();
     let drive = DriveService::new().await.map_err(std::io::Error::other)?;
+    let mapping = NativeMapping::new().await.map_err(std::io::Error::other)?;
     HttpRuntime::new(
         "127.0.0.1:8765",
         audio,
@@ -36,6 +38,7 @@ async fn main() -> std::io::Result<()> {
         camera,
         drive,
         bumpers,
+        mapping,
     )
     .run()
     .await

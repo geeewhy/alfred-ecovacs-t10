@@ -11,16 +11,26 @@ const file = path.join(root, 'artifacts/hq/chat.json');
 const hai = process.env.HQ_HAI_BIN || path.join(homedir(), '.haicue/bin/hai');
 const thread = 'one-offs/diy-ecovacs-t10-salvage';
 export class ChatService {
-  constructor(speech) {
+  constructor(speech, options = {}) {
+    this.file = options.file || file;
+    this.sessionStatus = "checking";
+    this.lastSessionCheck = 0;
+    if (options.command) this.command = options.command;
     this.speech = speech;
     this.state = { enabled: false, speaker: false, sessionId: null, agent: 'codex', model: '', sessionLabel: 'Alfred', messages: [], pending: null, error: null };
     this.queue = Promise.resolve();
     this.ready = this.load();
-    this.timer = setInterval(() => this.exclusive(() => this.poll()).catch(error => { this.state.error = error.message; }), 1000);
-    this.timer.unref();
+    if (options.poll !== false) {
+      this.timer = setInterval(() => {
+        if (this.polling) return;
+        this.polling = true;
+        this.exclusive(() => this.poll()).catch(error => { this.state.error = error.message; this.sessionStatus = 'error'; }).finally(() => { this.polling = false; });
+      }, 1000);
+      this.timer.unref();
+    }
   }
   async load() {
-    try { Object.assign(this.state, JSON.parse(await readFile(file, 'utf8'))); }
+    try { Object.assign(this.state, JSON.parse(await readFile(this.file, 'utf8'))); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
   exclusive(fn) {
@@ -28,19 +38,19 @@ export class ChatService {
     this.queue = job.catch(() => {});
     return job;
   }
-  async command(args) {
-    const { stdout } = await exec(hai, args, { cwd: root, timeout: 12000, maxBuffer: 2 * 1024 * 1024 });
+  async command(args, timeout = 12000) {
+    const { stdout } = await exec(hai, args, { cwd: root, timeout, maxBuffer: 2 * 1024 * 1024 });
     return JSON.parse(stdout);
   }
   async save() {
-    await mkdir(path.dirname(file), { recursive: true });
-    const temp = `${file}.tmp`;
+    await mkdir(path.dirname(this.file), { recursive: true });
+    const temp = `${this.file}.tmp`;
     await writeFile(temp, JSON.stringify(this.state));
-    await rename(temp, file);
+    await rename(temp, this.file);
   }
   snapshot() {
     const { enabled, speaker, sessionId, agent, model, messages, pending, error } = this.state;
-    return { enabled, speaker, sessionId, agent, model, messages, pending: pending ? { id: pending.id, status: pending.turnId ? 'Alfred is replying…' : 'Waiting for Haicue…' } : null, error };
+    return { enabled, speaker, sessionId, agent, model, messages, sessionStatus: enabled ? this.sessionStatus : "off", pending: pending ? { id: pending.id, status: pending.turnId ? 'Alfred is replying…' : 'Waiting for Haicue…' } : null, error };
   }
   async current() { await this.ready; return this.snapshot(); }
   settings(input) {
@@ -63,6 +73,13 @@ export class ChatService {
           this.state.launching = false;
         }
       }
+      if (input.enabled === true || 'agent' in input || 'model' in input) {
+        this.lastSessionCheck = 0; this.sessionStatus = 'checking';
+        if (!this.state.pending) this.state.error = null;
+        if (!this.state.sessionId && this.state.launching && Date.now() - (this.state.launchStarted || 0) > 15000) {
+          this.state.launching = false; this.state.sessionLabel = 'Alfred-' + randomUUID().slice(0, 8);
+        }
+      }
       await this.save(); return this.snapshot();
     });
   }
@@ -81,24 +98,59 @@ export class ChatService {
     if (!Object.keys(catalog).length) throw new Error('Haicue model inventory is unavailable');
     this.models = catalog; this.modelsAt = Date.now(); return catalog;
   }
-  async session() {
-    if (!this.state.sessionId) {
-      const { sessions } = await this.command(['list', 'sessions']);
-      const matches = sessions.filter(s => s.label === this.state.sessionLabel && s.thread === thread && s.agent === this.state.agent && !s.closed);
-      if (!matches.length && !this.state.launching) {
-        const args = ['session', 'open', thread, '--agent', this.state.agent, '--label', this.state.sessionLabel];
-        if (this.state.model) args.push('--model', this.state.model);
-        await this.command(args); this.state.launching = true; await this.save();
-        throw new Error('Alfred session is starting. Send again once ready.');
+  async ensureSession(deadline = Date.now() + 12000) {
+    const command = args => this.command(args, Math.max(1, Math.min(3000, deadline - Date.now())));
+    let session;
+    if (this.state.sessionId) {
+      try { session = await command(['session', 'inspect', this.state.sessionId]); }
+      catch (error) {
+        if (!/session.*not found|unknown session/i.test(`${error.stderr || ''} ${error.message}`)) throw error;
       }
-      if (matches.length !== 1) throw new Error('Alfred session is still starting; try again shortly');
-      this.state.sessionId = matches[0].id;
+      if (!session || session.closed || (session.pane_live === false && !['pending', 'starting', 'launching'].includes(session.lifecycle))) {
+        // Only a confirmed missing/closed session invalidates the binding.
+        this.state.sessionId = null; this.state.launching = false;
+        this.state.sessionLabel = 'Alfred-' + randomUUID().slice(0, 8);
+        session = null; await this.save();
+      }
     }
-    const session = await this.command(['session', 'inspect', this.state.sessionId]);
-    if (session.closed || !session.pane_live) throw new Error('Alfred’s Haicue session is closed');
+    if (!this.state.sessionId) {
+      this.sessionStatus = 'starting';
+      const { sessions } = await command(['list', 'sessions']);
+      const matches = sessions.filter(s => s.label === this.state.sessionLabel && s.thread === thread && s.agent === this.state.agent && !s.closed);
+      if (matches.length > 1) throw new Error('Multiple Alfred sessions match; choose a new agent/model binding in Settings');
+      if (matches.length === 1) {
+        this.state.sessionId = matches[0].id; this.state.launching = false;
+        await this.save();
+        session = await command(['session', 'inspect', this.state.sessionId]);
+      } else {
+        if (!this.state.launching) {
+          // Persist before launch: a timeout must not create duplicate sessions.
+          this.state.launching = true; this.state.launchStarted = Date.now(); await this.save();
+          const args = ['session', 'open', thread, '--agent', this.state.agent, '--label', this.state.sessionLabel];
+          if (this.state.model) args.push('--model', this.state.model);
+          await command(args);
+        } else {
+          this.state.launchStarted ||= Date.now();
+          if (Date.now() - this.state.launchStarted > 15000) throw new Error('Alfred session did not become ready. Toggle Chat mode to retry.');
+        }
+        return null;
+      }
+    }
     if (session.agent !== this.state.agent || session.thread !== thread) throw new Error('Alfred session binding no longer matches this robot');
-    if (!session.transcript_path) throw new Error('Alfred session is still starting');
-    return session;
+    if (session.closed || !session.pane_live || !session.transcript_path) { this.sessionStatus = 'starting'; return null; }
+    this.sessionStatus = 'ready'; this.state.launching = false;
+    if (!this.state.pending) this.state.error = null;
+    await this.save(); return session;
+  }
+  async session() {
+    const deadline = Date.now() + 5000;
+    do {
+      const session = await this.ensureSession(deadline);
+      if (session) return session;
+      if (Date.now() + 1000 >= deadline) break;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    } while (Date.now() < deadline);
+    throw new Error('Alfred session is starting. Try again once chat is ready.');
   }
   send(text) {
     return this.exclusive(async () => {
@@ -128,7 +180,13 @@ export class ChatService {
   }
   async poll() {
     const pending = this.state.pending;
-    if (!pending) return;
+    if (!pending) {
+      if (this.state.enabled && Date.now() - this.lastSessionCheck >= (this.sessionStatus === 'ready' ? 5000 : 1000)) {
+        this.lastSessionCheck = Date.now();
+        await this.ensureSession();
+      }
+      return;
+    }
     if (Date.now() - pending.started >= 15000 && !this.state.error) {
       this.state.error = 'No reply within 15 seconds. The Haicue request is still tracked; it will not be resent.';
       await this.save();

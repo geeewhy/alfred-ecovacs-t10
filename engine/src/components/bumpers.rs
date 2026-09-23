@@ -16,6 +16,8 @@ pub struct BumperStatus {
     pub left: Option<bool>,
     pub right: Option<bool>,
     pub raw: Option<u8>,
+    pub cliff_raw: Option<u8>,
+    pub wheel_lift_raw: Option<u8>,
     pub observed_at_unix_ms: Option<u64>,
     pub age_ms: Option<u64>,
     pub fresh: bool,
@@ -23,7 +25,7 @@ pub struct BumperStatus {
 
 #[derive(Default)]
 pub struct BumperTelemetry {
-    state: RwLock<(BumperStatus, Option<Instant>)>,
+    state: RwLock<(BumperStatus, [Option<Instant>; 3])>,
 }
 
 impl BumperTelemetry {
@@ -34,13 +36,46 @@ impl BumperTelemetry {
     pub fn current(&self) -> BumperStatus {
         let state = self.state.read().unwrap();
         let mut value = state.0.clone();
-        value.age_ms = state.1.map(|at| at.elapsed().as_millis() as u64);
+        value.age_ms = state.1[0].map(|at| at.elapsed().as_millis() as u64);
         value.fresh = value.age_ms.is_some_and(|age| age < 2000);
         if !value.fresh {
             value.left = None;
             value.right = None;
         }
+        if !state.1[1].is_some_and(|at| at.elapsed() < Duration::from_secs(2)) {
+            value.cliff_raw = None;
+        }
+        if !state.1[2].is_some_and(|at| at.elapsed() < Duration::from_secs(2)) {
+            value.wheel_lift_raw = None;
+        }
         value
+    }
+
+    fn update(&self, payload: &[u8]) -> Result<(), String> {
+        let bumper = decode(payload)?;
+        let cliff = sensor(payload, 1);
+        let lift = sensor(payload, 2);
+        let mut state = self.state.write().unwrap();
+        let now = Instant::now();
+        if let Some(raw) = bumper {
+            state.0.raw = Some(raw);
+            state.0.left = Some(raw & 1 != 0);
+            state.0.right = Some(raw & 2 != 0);
+            state.0.observed_at_unix_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|v| v.as_millis() as u64);
+            state.1[0] = Some(now);
+        }
+        if let Some(raw) = cliff {
+            state.0.cliff_raw = Some(raw);
+            state.1[1] = Some(now);
+        }
+        if let Some(raw) = lift {
+            state.0.wheel_lift_raw = Some(raw);
+            state.1[2] = Some(now);
+        }
+        Ok(())
     }
 
     pub fn start(self: &Arc<Self>) {
@@ -48,26 +83,8 @@ impl BumperTelemetry {
         tokio::spawn(async move {
             loop {
                 let receiver = Arc::clone(&service);
-                let result = RosSubscriber::subscribe(&TOPIC, move |payload| {
-                    if let Some(raw) = decode(payload)? {
-                        *receiver.state.write().unwrap() = (
-                            BumperStatus {
-                                left: Some(raw & 1 != 0),
-                                right: Some(raw & 2 != 0),
-                                raw: Some(raw),
-                                observed_at_unix_ms: SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .ok()
-                                    .map(|v| v.as_millis() as u64),
-                                age_ms: Some(0),
-                                fresh: true,
-                            },
-                            Some(Instant::now()),
-                        );
-                    }
-                    Ok(())
-                })
-                .await;
+                let result =
+                    RosSubscriber::subscribe(&TOPIC, move |payload| receiver.update(payload)).await;
                 if let Err(error) = result {
                     eprintln!("bumper subscriber reconnecting: {error}");
                 }
@@ -75,6 +92,14 @@ impl BumperTelemetry {
             }
         });
     }
+}
+
+fn sensor(payload: &[u8], kind: u8) -> Option<u8> {
+    payload
+        .get(4..)?
+        .chunks_exact(2)
+        .find(|entry| entry[0] == kind)
+        .map(|entry| entry[1])
 }
 
 fn decode(payload: &[u8]) -> Result<Option<u8>, String> {
@@ -104,6 +129,21 @@ mod tests {
         assert!(decode(&[2, 0, 0, 0, 0, 1]).is_err());
     }
     #[test]
+    fn partial_updates_preserve_other_fresh_sensors_but_do_not_refresh_them() {
+        let telemetry = BumperTelemetry::new();
+        telemetry.update(&[3, 0, 0, 0, 0, 0, 1, 0, 2, 0]).unwrap();
+        telemetry.update(&[1, 0, 0, 0, 0, 1]).unwrap();
+        assert_eq!(telemetry.current().left, Some(true));
+        assert_eq!(telemetry.current().cliff_raw, Some(0));
+        assert_eq!(telemetry.current().wheel_lift_raw, Some(0));
+        telemetry.state.write().unwrap().1[1] = Some(Instant::now() - Duration::from_secs(3));
+        telemetry.update(&[1, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(telemetry.current().cliff_raw, None);
+        assert_eq!(telemetry.current().wheel_lift_raw, Some(0));
+        telemetry.update(&[1, 0, 0, 0, 1, 1]).unwrap();
+        assert_eq!(telemetry.current().cliff_raw, Some(1));
+    }
+    #[test]
     fn stale_values_are_unknown_not_clear() {
         let telemetry = BumperTelemetry::new();
         assert_eq!(telemetry.current().left, None);
@@ -113,7 +153,7 @@ mod tests {
                 right: Some(false),
                 ..Default::default()
             },
-            Some(Instant::now() - Duration::from_secs(3)),
+            [Some(Instant::now() - Duration::from_secs(3)), None, None],
         );
         let state = telemetry.current();
         assert!(!state.fresh);

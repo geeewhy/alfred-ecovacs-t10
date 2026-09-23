@@ -48,6 +48,13 @@ pub struct DriveVector {
     pub angular: f32,
 }
 
+#[derive(Clone, Copy, Deserialize)]
+pub struct MappingTwist {
+    pub linear_mm_s: f32,
+    pub angular_rad_s: f32,
+    pub wheel_separation_mm: f32,
+}
+
 #[derive(Clone, Copy, Default, Serialize)]
 pub struct DriveState {
     pub linear: f32,
@@ -93,9 +100,61 @@ impl DriveService {
     }
 
     pub async fn command(&self, vector: DriveVector) -> Result<DriveState, String> {
+        self.command_with_settings(vector, None).await
+    }
+
+    pub async fn mapping_command(&self, vector: DriveVector) -> Result<DriveState, String> {
+        self.command_with_settings(
+            vector,
+            Some(DriveSettings {
+                max_speed_mm_s: 120.0,
+                turn_speed_mm_s: 70.0,
+            }),
+        )
+        .await
+    }
+
+    async fn command_with_settings(
+        &self,
+        vector: DriveVector,
+        limits: Option<DriveSettings>,
+    ) -> Result<DriveState, String> {
         if !valid_axis(vector.linear) || !valid_axis(vector.angular) {
             return Err("drive axes must be finite values from -1 to 1".to_string());
         }
+        let settings = limits.unwrap_or(self.active.lock().await.settings);
+        let wheels = mix(vector, settings);
+        self.command_wheels(vector, wheels).await
+    }
+
+    pub async fn mapping_twist(&self, value: MappingTwist) -> Result<DriveState, String> {
+        if !value.linear_mm_s.is_finite()
+            || !value.angular_rad_s.is_finite()
+            || !value.wheel_separation_mm.is_finite()
+            || value.wheel_separation_mm <= 0.0
+        {
+            return Err("Invalid physical velocity or wheel separation".into());
+        }
+        let turn = value.angular_rad_s * value.wheel_separation_mm / 2.0;
+        let wheels = (value.linear_mm_s - turn, value.linear_mm_s + turn);
+        if !wheels.0.is_finite() || !wheels.1.is_finite() {
+            return Err("Wheel velocity overflow".into());
+        }
+        self.command_wheels(
+            DriveVector {
+                linear: value.linear_mm_s,
+                angular: value.angular_rad_s,
+            },
+            wheels,
+        )
+        .await
+    }
+
+    async fn command_wheels(
+        &self,
+        vector: DriveVector,
+        wheels: (f32, f32),
+    ) -> Result<DriveState, String> {
         let started = Instant::now();
         let epoch = self.stop_epoch.load(Ordering::SeqCst);
         let moving = vector.linear != 0.0 || vector.angular != 0.0;
@@ -110,7 +169,7 @@ impl DriveService {
         {
             return Err("Drive request expired during wake; retry while held".into());
         }
-        let (left_mm_s, right_mm_s) = mix(vector, active.settings);
+        let (left_mm_s, right_mm_s) = wheels;
         self.publisher
             .publish(wheel_message(left_mm_s, right_mm_s))?;
         let state = DriveState {

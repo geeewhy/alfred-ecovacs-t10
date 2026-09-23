@@ -60,15 +60,16 @@ export class VoiceService {
       } finally { this.starting = false; }
     }
     if (this.child?.stdin.writable) {
-      const paused = !!state.pending || this.speech.busy || Date.now() < (this.speech.speakingUntil || 0);
+      const preparing = state.sessionStatus !== 'ready';
+      const paused = preparing || !!state.pending || this.speech.busy || Date.now() < (this.speech.speakingUntil || 0);
       this.child.stdin.write(JSON.stringify({ paused }) + '\n');
-      if (paused) this.state = { status: 'paused', message: 'Listening paused while Alfred replies' };
+      if (paused) this.state = { status: 'paused', message: preparing ? (state.error || 'Connecting Alfred’s chat session…') : 'Listening paused while Alfred replies' };
       else if (this.state.status === 'paused') this.state = { ...(this.workerState || { status: 'listening', message: 'Listening. Speak to Alfred.' }), lastHeard: this.lastHeard, meter: this.meter, transcription: this.transcription };
     }
   }
   async submit(text) {
     const state = await this.chat.current();
-    if (!state.enabled || state.pending || this.speech.busy || Date.now() < (this.speech.speakingUntil || 0)) return;
+    if (!state.enabled || state.sessionStatus !== 'ready' || state.pending || this.speech.busy || Date.now() < (this.speech.speakingUntil || 0)) return;
     try { await this.chat.send(text); }
     catch (error) { this.state = { status: 'error', message: error.message }; }
   }

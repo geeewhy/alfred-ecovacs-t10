@@ -77,6 +77,18 @@ impl RosPublisher {
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
+        let monitor = Arc::clone(&publisher);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if monitor.messages.receiver_count() == 0 {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        register_publisher(&topic, rpc_port),
+                    ).await;
+                }
+            }
+        });
         Ok(publisher)
     }
 
@@ -116,11 +128,17 @@ impl RosPublisher {
     }
 }
 
+// Each publisher has its own XML-RPC listener. ROS node identities must match
+// those distinct listener URIs or the master evicts the previous topic owner.
+fn publisher_id(topic: &RosTopic) -> String {
+    format!("{CALLER_ID}{}", topic.name)
+}
+
 async fn register_publisher(topic: &RosTopic, rpc_port: u16) -> Result<(), String> {
     let body = method_call(
         "registerPublisher",
         &[
-            string_param(CALLER_ID),
+            string_param(&publisher_id(topic)),
             string_param(topic.name),
             string_param(topic.message_type),
             string_param(&format!("http://127.0.0.1:{rpc_port}/")),
@@ -241,7 +259,7 @@ async fn write_tcpros_header(stream: &mut TcpStream, topic: &RosTopic) -> Result
 
 async fn write_publisher_header(stream: &mut TcpStream, topic: &RosTopic) -> Result<(), String> {
     let fields = [
-        format!("callerid={CALLER_ID}"),
+        format!("callerid={}", publisher_id(topic)),
         format!("md5sum={}", topic.md5),
         format!("type={}", topic.message_type),
         "latching=0".to_string(),

@@ -1,0 +1,79 @@
+diff --git a/explore/src/explore.cpp b/explore/src/explore.cpp
+index d72fb18..71a5dd2 100644
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -230,6 +230,22 @@ void Explore::makePlan()
+ {
+   // find frontiers
+   auto pose = costmap_client_.getRobotPose();
++  // Keep the accepted goal stable while the measured map boundary moves.
++  if (goal_active_) {
++    const double distance = std::hypot(prev_goal_.x - pose.position.x,
++                                       prev_goal_.y - pose.position.y);
++    if (distance < prev_distance_ - 0.02) {
++      last_progress_ = this->now();
++      prev_distance_ = distance;
++    }
++    if (this->now() - last_progress_ <= tf2::durationFromSec(progress_timeout_)) {
++      return;
++    }
++    frontier_blacklist_.push_back(prev_goal_);
++    goal_active_ = false;
++    move_base_client_->async_cancel_all_goals();
++    return;  // Let cancellation finish before selecting another goal.
++  }
+   // get frontiers sorted according to cost
+   auto frontiers = search_.searchFrom(pose.position);
+   RCLCPP_DEBUG(logger_, "found %lu frontiers", frontiers.size());
+@@ -255,7 +271,7 @@ void Explore::makePlan()
+   auto frontier =
+       std::find_if_not(frontiers.begin(), frontiers.end(),
+                        [this](const frontier_exploration::Frontier& f) {
+-                         return goalOnBlacklist(f.centroid);
++                         return goalOnBlacklist(f.middle);
+                        });
+   if (frontier == frontiers.end()) {
+     RCLCPP_WARN(logger_, "All frontiers traversed/tried out, stopping.");
+@@ -265,37 +281,13 @@ void Explore::makePlan()
+     stop(true);
+     return;
+   }
+-  geometry_msgs::msg::Point target_position = frontier->centroid;
+-
+-  // time out if we are not making any progress
+-  bool same_goal = same_point(prev_goal_, target_position);
++  geometry_msgs::msg::Point target_position = frontier->middle;
+ 
+   prev_goal_ = target_position;
+-  if (!same_goal || prev_distance_ > frontier->min_distance) {
+-    // we have different goal or we made some progress
+-    last_progress_ = this->now();
+-    prev_distance_ = frontier->min_distance;
+-  }
+-  // black list if we've made no progress for a long time
+-  if (goal_active_ &&
+-      (this->now() - last_progress_ >
+-       tf2::durationFromSec(progress_timeout_)) &&
+-      !resuming_) {
+-    frontier_blacklist_.push_back(target_position);
+-    RCLCPP_DEBUG(logger_, "Adding current goal to black list");
+-    makePlan();
+-    return;
+-  }
+-
+-  // ensure only first call of makePlan was set resuming to true
+-  if (resuming_) {
+-    resuming_ = false;
+-  }
+-
+-  // we don't need to do anything if we still pursuing the same goal
+-  if (same_goal && goal_active_) {
+-    return;
+-  }
++  prev_distance_ = std::hypot(target_position.x - pose.position.x,
++                              target_position.y - pose.position.y);
++  last_progress_ = this->now();
++  resuming_ = false;
+ 
+   RCLCPP_DEBUG(logger_, "Sending goal to move base nav2");
+ 

@@ -1,7 +1,7 @@
 use crate::components::ros::{RosSubscriber, RosTopic};
 use serde::Serialize;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 const LIDAR_TOPIC: RosTopic = RosTopic {
@@ -11,13 +11,17 @@ const LIDAR_TOPIC: RosTopic = RosTopic {
     md5: "ba4104feb5e50b9c15d3e29666224d02",
     max_frame_bytes: 128 * 1024,
 };
-const MAX_POINTS: usize = 720;
+const MAX_POINTS: usize = 4096;
 
 #[derive(Clone, Default, Serialize)]
 pub struct LidarScan {
     pub sequence: u32,
+    pub source_stamp: f64,
     pub observed_at_unix_ms: u64,
     pub source_points: usize,
+    pub age_ms: Option<u64>,
+    #[serde(skip)]
+    pub(crate) received_at: Option<Instant>,
     pub points: Vec<LidarPoint>,
 }
 
@@ -40,7 +44,9 @@ impl LidarTelemetry {
     }
 
     pub async fn current(&self) -> LidarScan {
-        self.scan.read().await.clone()
+        let mut scan = self.scan.read().await.clone();
+        scan.age_ms = scan.received_at.map(|at| at.elapsed().as_millis() as u64);
+        scan
     }
 
     pub fn start(self: &Arc<Self>) {
@@ -79,7 +85,10 @@ fn parse_scan(payload: &[u8]) -> Result<LidarScan, String> {
         return Err("short ROS lidar message".to_string());
     }
 
-    let stride = count.div_ceil(MAX_POINTS).max(1);
+    if count > MAX_POINTS {
+        return Err("Oversized LiDAR scan".into());
+    }
+    let stride = 1;
     let mut points = Vec::with_capacity(count.div_ceil(stride));
     for index in (0..count).step_by(stride) {
         let offset = points_offset + index * 20;
@@ -93,11 +102,14 @@ fn parse_scan(payload: &[u8]) -> Result<LidarScan, String> {
 
     Ok(LidarScan {
         sequence,
+        source_stamp: read_u32(payload, 4)? as f64 + read_u32(payload, 8)? as f64 / 1e9,
         observed_at_unix_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_millis() as u64)
             .unwrap_or_default(),
         source_points: count,
+        age_ms: Some(0),
+        received_at: Some(Instant::now()),
         points,
     })
 }

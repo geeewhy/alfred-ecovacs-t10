@@ -1,3 +1,4 @@
+import { startMappingRuntime } from "./maps/runtime.mjs";
 import { diagnostic } from "./infra/diagnostics.mjs";
 import { AdbClient } from "./bot/adb-client.mjs";
 import { EngineClient } from "./bot/engine-client.mjs";
@@ -17,5 +18,6 @@ const statusService = new RobotStatusService(adbClient, config.robot);
 const server = new HqServer(config, statusService, engineClient);
 
 await server.listen();
+void startMappingRuntime().catch(error=>diagnostic("mapping-runtime-unavailable",{error:error.message}));
 await diagnostic('hq-listening', { port: config.port });
 console.log(`HQ listening at http://${config.host}:${config.port}`);

@@ -1,6 +1,9 @@
+import { mapsPage, mountMaps } from './maps.js';
+let disposeMaps = () => {};
 const app = document.querySelector("#app");
 
 const icons = {
+  maps: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3 4 4-1 6 2 4-1v12l-4 1-6-2-4 1Zm4-1v12m6-10v12"/></svg>`,
   home: `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 9.1 10 3.8l6.5 5.3v7.1H12v-4.5H8v4.5H3.5Z"/></svg>`,
   cockpit: `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.7"/><circle cx="10" cy="10" r="2"/><path d="M10 3.3v4.6M4.2 13.4l4-2.3m7.6 2.3-4-2.3"/></svg>`,
   robot: `<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10.5" r="6.4"/><path d="M6.7 6.9h6.6M10 4.1v2.8"/><circle cx="7.6" cy="10.5" r=".7"/><circle cx="12.4" cy="10.5" r=".7"/></svg>`,
@@ -15,11 +18,12 @@ function shell(content, active) {
         <nav aria-label="Primary">
           <a class="nav-item ${active === "home" ? "active" : ""}" href="/" data-route>${icons.home}<span>Home</span></a>
           <a class="nav-item ${active === "cockpit" ? "active" : ""}" href="/cockpit" data-route>${icons.cockpit}<span>Cockpit</span></a>
+          <a class="nav-item ${active === "maps" ? "active" : ""}" href="/maps" data-route>${icons.maps}<span>Maps</span></a>
           <a class="nav-item ${active === "settings" ? "active" : ""}" href="/settings" data-route>${icons.robot}<span>Settings</span></a>
         </nav>
         <div class="rail-foot"><span class="local-mark"></span><span>Local</span></div>
       </aside>
-      <main>${content}</main>
+      <main><div id="mapping-banner" class="mapping-banner" hidden><span id="mapping-banner-text"></span><button id="mapping-banner-stop">Pause exploration</button></div>${content}</main>
     </div>`;
 }
 
@@ -142,7 +146,7 @@ function cockpit(robot) {
           <form id="speech-form" class="speech-form">
             <div class="chat-controls"><label><input type="checkbox" id="chat-mode"> Chat mode</label><button type="button" class="settings-button" id="chat-history">History</button></div>
             <p id="microphone-status" class="microphone-status" role="status"></p>
-            <label for="speech-text" id="speech-label">Say something</label>
+            <label for="speech-text" id="speech-label">Text to speech</label>
             <textarea id="speech-text" rows="2" maxlength="1000" required placeholder="How can I help you, my good sir?"></textarea>
             <div class="speech-actions"><a href="/settings" data-route>Voice settings</a><button class="settings-button primary" id="speak-button" type="submit">Speak</button></div>
             <p id="speech-status" role="status"></p>
@@ -177,6 +181,12 @@ function cockpit(robot) {
 
 function settingsPage() {
   return shell(`<div class="content settings-page"><section class="heading"><p class="eyebrow">ALFRED</p><h1>Settings</h1></section>
+    <form id="mapping-settings-form" class="voice-settings-form"><h2>Mapping</h2>
+      <label for="mapping-cruise">Cruise speed (mm/s)</label><input id="mapping-cruise" type="number" min="0" step="any" required value="120">
+      <label for="mapping-approach">Approach speed (mm/s)</label><input id="mapping-approach" type="number" min="0" step="any" required value="60">
+      <p class="settings-description">Slows near edges and turns, then returns to cruise in clear space.</p>
+      <button class="settings-button primary" id="save-mapping">Save mapping speeds</button><p id="mapping-settings-status" role="status"></p>
+    </form>
     <form id="voice-settings-form" class="voice-settings-form"><h2>Speech</h2>
       <label for="speech-voice">Voice</label><select id="speech-voice" disabled><option>Loading…</option></select>
       <p class="settings-description">Used when Alfred speaks text from Cockpit. Saved on this Mac.</p>
@@ -195,7 +205,7 @@ async function startVoiceSettings() {
   const form = document.querySelector("#voice-settings-form");
   const select = form.querySelector("select");
   const button = form.querySelector("button");
-  const status = form.querySelector("[role=status]");
+  const status = form.querySelector("#speech-status");
   try {
     const response = await chatFetch("/api/bots/alfred/speech/settings");
     const data = await response.json();
@@ -240,7 +250,7 @@ function startSpeech() {
   const form = document.querySelector("#speech-form");
   const field = form.querySelector("textarea");
   const button = form.querySelector("#speak-button");
-  const status = form.querySelector("[role=status]");
+  const status = form.querySelector("#speech-status");
   field.addEventListener("focus", () => stopDrive());
   field.addEventListener("keydown", event => {
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
@@ -250,12 +260,11 @@ function startSpeech() {
   form.addEventListener("submit", async event => {
     event.preventDefault();
     if (button.disabled || !field.value.trim()) return;
-    button.disabled = true; status.textContent = chatState.enabled ? "Sending to Alfred…" : "Preparing speech…";
+    button.disabled = true; status.textContent = "Preparing speech…";
     try {
-      const response = await chatFetch(chatState.enabled ? "/api/bots/alfred/chat" : "/api/bots/alfred/speech", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: field.value }) });
+      const response = await chatFetch("/api/bots/alfred/speech", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: field.value }) });
       const data = await response.json(); if (!response.ok) throw new Error(data.error);
-      if (chatState.enabled) { chatState = data.result; field.value = ""; renderChat(); status.textContent = "Sent to Alfred"; }
-      else status.textContent = data.result.message;
+      status.textContent = data.result.message;
     } catch (error) { status.textContent = error.message; }
     finally { button.disabled = false; }
   });
@@ -267,15 +276,12 @@ function renderChat() {
   const toggle = document.querySelector("#chat-mode");
   if (!toggle) return;
   toggle.checked = chatState.enabled;
-  document.querySelector("#microphone-status").textContent = chatState.enabled ? (((chatState.microphone?.message || "Starting robot microphone…") + (chatState.microphone?.meter ? ` Audio level: ${chatState.microphone.meter.rmsPeak}.` : "") + (chatState.microphone?.transcription && !chatState.microphone.transcription.text ? " No words recognized in the last audio segment." : "")) + (chatState.microphone?.lastHeard ? ` Last heard: “${chatState.microphone.lastHeard.text}”${chatState.microphone.lastHeard.accepted ? "" : " (uncertain audio, skipped)"}` : "")) : "";
+  document.querySelector("#microphone-status").textContent = chatState.enabled ? (((chatState.microphone?.message || "Starting robot microphone…") + (chatState.microphone?.status === "listening" && chatState.microphone?.meter ? ` Audio level: ${chatState.microphone.meter.rmsPeak}.` : "") + (chatState.microphone?.transcription && !chatState.microphone.transcription.text ? " No words recognized in the last audio segment." : "")) + (chatState.microphone?.lastHeard ? ` Last heard: “${chatState.microphone.lastHeard.text}”${chatState.microphone.lastHeard.accepted ? "" : " (uncertain audio, skipped)"}` : "")) : "";
   document.querySelector("#chat-speaker").checked = chatState.speaker;
-  document.querySelector("#speech-label").textContent = chatState.enabled ? "Message Alfred" : "Say something";
-  document.querySelector("#speak-button").textContent = chatState.enabled ? "Send" : "Speak";
-  document.querySelector("#chat-send").disabled = !chatState.enabled || !!chatState.pending;
-  document.querySelector("#chat-session-status").textContent = chatState.sessionId ? `Haicue · ${chatState.agent || "codex"}` : "Haicue · Alfred";
+  document.querySelector("#chat-send").disabled = !chatState.enabled || chatState.sessionStatus !== "ready" || !!chatState.pending;
+  document.querySelector("#chat-session-status").textContent = chatState.sessionStatus === "ready" ? `Haicue · ${chatState.agent || "codex"}` : chatState.enabled ? "Connecting Alfred…" : "Haicue · Alfred";
   const pending = chatState.error || chatState.pending?.status || (!chatState.enabled ? "Turn on Chat mode to send messages." : "");
   document.querySelector("#chat-pending").textContent = pending;
-  if (chatState.enabled) document.querySelector("#speech-status").textContent = pending || (chatState.messages.at(-1)?.role === "alfred" ? "Alfred replied · History" : "");
   const signature = JSON.stringify(chatState.messages);
   if (signature === renderedChat) return;
   renderedChat = signature;
@@ -310,7 +316,7 @@ function startChat(run) {
     document.getElementById(id).onchange = async event => {
       const field = event.target; field.disabled = true; stopDrive();
       try { await chatSettings({ [key]: field.checked }); }
-      catch (error) { renderChat(); document.querySelector("#speech-status").textContent = error.message; }
+      catch (error) { renderChat(); document.querySelector("#microphone-status").textContent = error.message; }
       finally { field.disabled = false; }
     };
   }
@@ -331,7 +337,7 @@ function startChat(run) {
       const data = await response.json(); if (!response.ok) throw new Error(data.error);
       if (run !== cockpitRun) return;
       chatState = data.result; renderChat();
-    } catch (error) { if (run === cockpitRun) document.querySelector("#speech-status").textContent = "Chat unavailable: " + error.message; }
+    } catch (error) { if (run === cockpitRun) document.querySelector("#microphone-status").textContent = "Chat unavailable: " + error.message; }
     if (run === cockpitRun) setTimeout(poll, 1000);
   }
   poll();
@@ -347,10 +353,12 @@ let lastDriveVector = { linear: 0, angular: 0 };
 let driveEpoch = 0;
 
 function route() {
+  disposeMaps();
   stopDrive();
   const run = ++cockpitRun;
   document.body.classList.toggle("cockpit-mode", location.pathname === "/cockpit");
-  app.innerHTML = location.pathname === "/cockpit" ? cockpit(robot) : location.pathname === "/settings" ? settingsPage() : home(robot);
+  document.body.classList.toggle("maps-mode", location.pathname === "/maps");
+  app.innerHTML = location.pathname === "/maps" ? shell(mapsPage(), "maps") : location.pathname === "/cockpit" ? cockpit(robot) : location.pathname === "/settings" ? settingsPage() : home(robot);
   document.querySelectorAll("[data-route]").forEach((link) => link.addEventListener("click", (event) => {
     event.preventDefault();
     history.pushState({}, "", link.href);
@@ -363,7 +371,11 @@ function route() {
     startSpeech();
     startChat(run);
   }
-  if (location.pathname === "/settings") { startVoiceSettings(); startAgentSettings(); }
+  const mappingStop=document.querySelector('#mapping-banner-stop');
+  if(mappingStop)mappingStop.onclick=()=>fetch('/api/maps/active/pause',{method:'POST',signal:AbortSignal.timeout(5000)}).then(refreshMappingBanner);
+  refreshMappingBanner();
+  if (location.pathname === "/maps") disposeMaps = mountMaps();
+  if (location.pathname === "/settings") { startVoiceSettings(); startAgentSettings(); startMappingSettings(); }
 }
 
 function activeDirections() {
@@ -432,7 +444,7 @@ function ensureDriveTimer() {
   }
 }
 
-function stopDrive(preserveBoost = false) {
+function stopDrive(preserveBoost = false, force = false) {
   const shouldNotify = driveTimer || lastDriveVector.linear !== 0 || lastDriveVector.angular !== 0;
   const boostHeld = preserveBoost && driveKeys.has("boost");
   driveEpoch += 1;
@@ -446,7 +458,7 @@ function stopDrive(preserveBoost = false) {
   renderDrive({ left_mm_s: 0, right_mm_s: 0 });
   const status = document.querySelector("#drive-status");
   if (status) status.textContent = "Stopped";
-  if (shouldNotify || location.pathname === "/cockpit") {
+  if (shouldNotify || force) {
     fetch("/api/bots/alfred/drive/stop", { method: "POST", keepalive: true }).catch(() => {});
   }
 }
@@ -508,7 +520,7 @@ function startControls() {
     const direction = button.dataset.drive;
     button.addEventListener("pointerdown", (event) => {
       event.preventDefault();
-      if (direction === "stop") return stopDrive();
+      if (direction === "stop") return stopDrive(false, true);
       button.setPointerCapture(event.pointerId);
       drivePointers.set(event.pointerId, direction);
       ensureDriveTimer();
@@ -599,7 +611,7 @@ async function pollLidar(run) {
     if (run !== cockpitRun) return;
     drawLidar(result);
     const status = document.querySelector("#lidar-status");
-    const fresh = Date.now() - result.observed_at_unix_ms < 2_000;
+    const fresh = (Number.isFinite(result.age_ms) ? result.age_ms : Date.now() - result.observed_at_unix_ms) < 2_000;
     if (status) status.textContent = `${result.source_points ?? 0} PTS · ${fresh ? "LIVE" : "STALE"}`;
   } catch {
     const status = document.querySelector("#lidar-status");
@@ -652,6 +664,7 @@ async function refresh() {
   } catch (error) {
     robot = { name: "Alfred", model: "Ecovacs T10 Omni DBX53", online: false, observedAt: new Date().toISOString(), error: error.message };
   }
+  if (location.pathname === "/maps" && document.querySelector(".maps-page")) return;
   if (location.pathname === "/settings" && document.querySelector(".settings-page")) return;
   if (location.pathname !== "/cockpit" || !document.querySelector(".cockpit-grid")) route();
   else {
@@ -687,4 +700,16 @@ async function pollBumpers(run) {
   }
   document.querySelector("#bumper-status").textContent = !state ? "OFFLINE" : state.fresh ? "LIVE" : "STALE";
   setTimeout(() => pollBumpers(run), 250);
+}
+
+async function refreshMappingBanner(){
+ try{const response=await fetch('/api/maps/active',{signal:AbortSignal.timeout(2000)}),{result}=await response.json();const banner=document.querySelector('#mapping-banner');if(!banner)return;banner.hidden=!(result?.mode==='explore'&&result.state==='scanning');if(!banner.hidden)document.querySelector('#mapping-banner-text').textContent='Alfred is mapping · '+(result.message||'Exploring');}catch{}
+}
+setInterval(refreshMappingBanner,1000);
+
+async function startMappingSettings(){
+ const form=document.querySelector('#mapping-settings-form'),status=document.querySelector('#mapping-settings-status'),cruise=document.querySelector('#mapping-cruise'),approach=document.querySelector('#mapping-approach');
+ const call=async(body)=>{const r=await fetch('/api/maps/settings',{method:body?'PUT':'GET',headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(8000)});const d=await r.json();if(!d.ok)throw Error(d.error);return d.result;};
+ try{const value=await call();cruise.value=value.cruise_mm_s;approach.value=value.approach_mm_s;}catch(e){status.textContent=e.message;}
+ form.onsubmit=async(e)=>{e.preventDefault();const button=document.querySelector('#save-mapping');button.disabled=true;try{await call({cruise_mm_s:Number(cruise.value),approach_mm_s:Number(approach.value)});status.textContent='Mapping speeds saved.';}catch(error){status.textContent=error.message;}finally{button.disabled=false;}};
 }
