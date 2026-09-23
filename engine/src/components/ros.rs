@@ -62,7 +62,21 @@ impl RosPublisher {
             serve_publisher_rpc(rpc_listener, message_port).await;
         });
 
-        register_publisher(&topic, rpc_port).await?;
+        // The /data boot hook can run before the stock ROS master is ready.
+        // Keep these listeners and retry registration instead of exiting boot.
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                register_publisher(&topic, rpc_port),
+            )
+            .await
+            {
+                Ok(Ok(())) => break,
+                Ok(Err(error)) => eprintln!("drive publisher awaiting ROS: {error}"),
+                Err(_) => eprintln!("drive publisher awaiting ROS: registration timed out"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
         Ok(publisher)
     }
 
@@ -328,4 +342,70 @@ fn io_string(error: io::Error) -> String {
 
 fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Bounded TCPROS service call; schema mismatch fails before sending a request.
+pub async fn call_service(name: &str, md5: &str, payload: &[u8]) -> Result<Vec<u8>, String> {
+    tokio::time::timeout(std::time::Duration::from_millis(250), async {
+        let body = method_call(
+            "lookupService",
+            &[string_param(CALLER_ID), string_param(name)],
+        );
+        let response = xmlrpc(MASTER_ADDRESS, &body).await?;
+        let uri = strings(&response)
+            .into_iter()
+            .find(|v| v.starts_with("rosrpc://"))
+            .ok_or_else(|| format!("ROS service unavailable: {name}"))?;
+        let address = uri
+            .trim_start_matches("rosrpc://")
+            .trim_end_matches('/')
+            .replace("localhost", "127.0.0.1");
+        let mut stream = TcpStream::connect(address).await.map_err(io_string)?;
+        let mut header = Vec::new();
+        for field in [
+            format!("callerid={CALLER_ID}"),
+            format!("service={name}"),
+            format!("md5sum={md5}"),
+            "persistent=0".into(),
+        ] {
+            header.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            header.extend_from_slice(field.as_bytes());
+        }
+        stream
+            .write_all(&(header.len() as u32).to_le_bytes())
+            .await
+            .map_err(io_string)?;
+        stream.write_all(&header).await.map_err(io_string)?;
+        let header = read_frame(&mut stream, 65536).await?;
+        let mut fields = header.as_slice();
+        let expected = format!("md5sum={md5}");
+        let mut matched = false;
+        while fields.len() >= 4 {
+            let n = u32::from_le_bytes(fields[..4].try_into().unwrap()) as usize;
+            fields = &fields[4..];
+            if n > fields.len() {
+                return Err("Invalid ROS service header".into());
+            }
+            if &fields[..n] == expected.as_bytes() {
+                matched = true;
+            }
+            fields = &fields[n..];
+        }
+        if !matched {
+            return Err(format!("ROS service schema mismatch: {name}"));
+        }
+        stream
+            .write_all(&(payload.len() as u32).to_le_bytes())
+            .await
+            .map_err(io_string)?;
+        stream.write_all(payload).await.map_err(io_string)?;
+        let success = stream.read_u8().await.map_err(io_string)?;
+        let result = read_frame(&mut stream, 65536).await?;
+        if success != 1 {
+            return Err(String::from_utf8_lossy(&result).into_owned());
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|_| format!("ROS service timed out: {name}"))?
 }
