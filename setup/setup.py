@@ -50,6 +50,7 @@ def ensure_access():
     robot=Robot()
     capture_access_diagnostics(robot,'before')
     robot.shell('mkdir -p /data/alfred; test -s /data/misc/adb/adb_keys')
+    robot.upload(ROOT/'setup/rolling_log.py','/data/alfred/rolling_log.py')
     robot.upload(ROOT/'setup/adb-start.sh','/data/alfred/adb-start.sh')
     robot.shell('chmod 700 /data/alfred/adb-start.sh; sh -n /data/alfred/adb-start.sh')
     # Initialization must handle an existing TCP-only daemon. Detach the restart
@@ -96,6 +97,7 @@ def persist():
     if hook:
         if 'alfred/adb-start.sh' not in hook:raise RuntimeError('Unrecognized recovery hook; refusing overwrite')
         robot.shell('rm /data/autostart/recovery.sh')
+    robot.upload(ROOT/'setup/rolling_log.py','/data/alfred/rolling_log.py')
     robot.upload(ROOT/'setup/adb-start.sh','/data/alfred/adb-start.sh')
     robot.shell('chmod 700 /data/alfred/adb-start.sh; sh -n /data/alfred/adb-start.sh; ln -sf /data/alfred/adb-start.sh /data/autostart/alfred.sh; sync')
     if '!autostart.sh' in rc:
