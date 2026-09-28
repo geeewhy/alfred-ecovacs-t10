@@ -2,7 +2,7 @@
 //! refinement, with distinct modes retained across observations. This is not AMCL.
 use super::{
     map_evidence::EvidenceMap,
-    reflectance::Grid,
+    reflectance::{Boundaries, Grid},
     return_geometry::{Pose, wrap},
 };
 use serde::Serialize;
@@ -154,7 +154,16 @@ impl ScanMatcher {
         }
         best
     }
+    #[cfg(test)]
     pub fn global(&self, points: &[[f64; 2]], evidence: &EvidenceMap) -> Vec<Hypothesis> {
+        self.global_with_reflections(points, evidence, None)
+    }
+    pub fn global_with_reflections(
+        &self,
+        points: &[[f64; 2]],
+        evidence: &EvidenceMap,
+        reflections: Option<&Boundaries>,
+    ) -> Vec<Hypothesis> {
         if points.len() < 100 {
             return vec![];
         }
@@ -192,8 +201,22 @@ impl ScanMatcher {
             }
             explored.push(c.pose);
             let fit = self.refine(c.pose, &sparse, true);
-            let mut fit = self.refine(fit.pose, points, false);
-            let visibility = evidence.evaluate(fit.pose, points);
+            // Apply each hypothesis's mask BEFORE full-scan fitting and the
+            // visibility rejection. Otherwise the valid location can already
+            // have been thrown out because of its reflected returns.
+            let filtered: Vec<_> = points
+                .iter()
+                .copied()
+                .filter(|p| reflections.is_none_or(|r| !r.reflected(fit.pose, *p)))
+                .collect();
+            if filtered.len() < 100 || filtered.len() * 3 < points.len() {
+                if explored.len() >= 32 {
+                    break;
+                }
+                continue;
+            }
+            let mut fit = self.refine(fit.pose, &filtered, false);
+            let visibility = evidence.evaluate(fit.pose, &filtered);
             // Endpoint proximity alone rewards dense clutter and mirror ghosts.
             // Rank with free-space consistency as well, before selecting a mode.
             fit.likelihood -= 0.5 * visibility.contradiction;
@@ -339,6 +362,55 @@ mod tests {
 mod robustness_tests {
     use super::*;
     use crate::components::map_evidence::Reference;
+    #[test]
+    fn global_localization_masks_reflections_before_visibility_rejection() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../mapping/fixtures/known-position-duplicate-seeds.json"
+        ))
+        .unwrap();
+        let grid: Grid = serde_json::from_value(v["grid"].clone()).unwrap();
+        let points: Vec<[f64; 2]> = serde_json::from_value(v["points"].clone()).unwrap();
+        let evidence = EvidenceMap::new(Reference {
+            map_id: "00000000-0000-0000-0000-000000000000".into(),
+            revision: "mirror-test".into(),
+            grid: grid.clone(),
+        })
+        .unwrap();
+        let matcher = ScanMatcher::new(grid);
+        let expected = unique(&matcher.global(&points, &evidence)).unwrap();
+        let (s, c) = expected.pose.theta.sin_cos();
+        let mut corrupted = points.clone();
+        let mut changed = 0;
+        for p in &mut corrupted {
+            let dx = p[0] * c - p[1] * s;
+            let dy = p[0] * s + p[1] * c;
+            if dx > 0.8 && dy.abs() < dx * 0.7 {
+                p[0] *= 2.5;
+                p[1] *= 2.5;
+                changed += 1;
+            }
+        }
+        assert!(changed > 50);
+        let x = ((expected.pose.x + 0.6) / 0.05).floor() as i32;
+        let y = (expected.pose.y / 0.05).floor() as i32;
+        let cells: Vec<_> = (-12..=12).map(|dy| [x, y + dy]).collect();
+        let mask = Boundaries::new(crate::components::reflectance::Model {
+            map_id: evidence_id(),
+            revision: "test".into(),
+            blocked_bins: vec![(0..180).collect(); cells.len()],
+            cells,
+        })
+        .unwrap();
+        let modes = matcher.global_with_reflections(&corrupted, &evidence, Some(&mask));
+        let found = modes
+            .iter()
+            .find(|h| h.pose.distance(expected.pose) < 0.15)
+            .expect("known location survives reflected returns");
+        assert!(found.agreement > 0.9, "{}", found.agreement);
+    }
+    fn evidence_id() -> String {
+        "00000000-0000-0000-0000-000000000000".into()
+    }
     #[test]
     fn duplicated_map_requires_more_information_than_one_scan() {
         let v: serde_json::Value = serde_json::from_str(include_str!(

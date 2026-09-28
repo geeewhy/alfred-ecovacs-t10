@@ -266,6 +266,7 @@ pub struct Metrics {
     pub reflected_rays: usize,
     pub candidate_cells: usize,
     pub boundary_cells: usize,
+    pub unvalidated_cells: usize,
     pub elapsed_ms: u128,
 }
 struct Evidence {
@@ -450,6 +451,8 @@ pub fn rebuild(history: History) -> Result<Rebuilt, String> {
     });
     // No interpolation across unmeasured spans. Require a measured spatial
     // neighbor, avoiding isolated ghosts becoming barriers.
+    metrics.unvalidated_cells = glass.len();
+    validate_surfaces(&mut glass, &frames);
     let cells: Vec<_> = glass
         .iter()
         .filter(|&&(x, y)| {
@@ -490,6 +493,85 @@ pub fn rebuild(history: History) -> Result<Rebuilt, String> {
         reflectance: model,
         metrics,
     })
+}
+/// A directional inconsistency alone is not a surface. Require a measured
+/// planar neighborhood and direct returns near its normal from independent
+/// robot positions. Repeated stationary scans cannot supply that evidence.
+/// This deliberately does not fill gaps between measured cells.
+fn validate_surfaces(cells: &mut HashSet<CellKey>, frames: &[Keyframe]) {
+    let original = cells.clone();
+    let mut views: HashMap<CellKey, HashSet<(i32, i32)>> = HashMap::new();
+    for frame in frames {
+        let bucket = (
+            (frame.pose.x / 0.1).floor() as i32,
+            (frame.pose.y / 0.1).floor() as i32,
+        );
+        for &p in &frame.points {
+            let k = key(p);
+            if original.contains(&k) {
+                views.entry(k).or_default().insert(bucket);
+            }
+        }
+    }
+    cells.retain(|&k| {
+        let p = center(k);
+        let mut neighbors = Vec::new();
+        for dx in -7..=7 {
+            for dy in -7..=7 {
+                let q = (k.0 + dx, k.1 + dy);
+                if original.contains(&q) && dx * dx + dy * dy <= 49 {
+                    neighbors.push(q);
+                }
+            }
+        }
+        if neighbors.len() < 6 {
+            return false;
+        }
+        let n = neighbors.len() as f64;
+        let mean = neighbors.iter().fold([0., 0.], |mut a, &q| {
+            let c = center(q);
+            a[0] += c[0] / n;
+            a[1] += c[1] / n;
+            a
+        });
+        let (mut xx, mut xy, mut yy) = (0., 0., 0.);
+        for &q in &neighbors {
+            let c = center(q);
+            let (x, y) = (c[0] - mean[0], c[1] - mean[1]);
+            xx += x * x;
+            xy += x * y;
+            yy += y * y;
+        }
+        let disc = ((xx - yy) * (xx - yy) + 4. * xy * xy).sqrt();
+        let major = (xx + yy + disc) / 2.;
+        let minor = (xx + yy - disc) / 2.;
+        if major / n < 0.006 || minor > major * 0.08 {
+            return false;
+        }
+        let angle = 0.5 * (2. * xy).atan2(xx - yy);
+        let normal = [-angle.sin(), angle.cos()];
+        let mut independent = HashSet::new();
+        for q in neighbors {
+            if let Some(observers) = views.get(&q) {
+                let c = center(q);
+                for &v in observers {
+                    let delta = [
+                        c[0] - (v.0 as f64 + 0.5) * 0.1,
+                        c[1] - (v.1 as f64 + 0.5) * 0.1,
+                    ];
+                    let len = delta[0].hypot(delta[1]);
+                    if len > 0.18
+                        && (delta[0] * normal[0] + delta[1] * normal[1]).abs() / len > 0.94
+                    {
+                        independent.insert(v);
+                    }
+                }
+            }
+        }
+        // The fitted surface must actually pass through this measured cell.
+        independent.len() >= 3
+            && ((p[0] - mean[0]) * normal[0] + (p[1] - mean[1]) * normal[1]).abs() < 0.075
+    });
 }
 fn repair_grid(
     frames: Vec<Keyframe>,
@@ -801,6 +883,43 @@ mod tests {
         let r = rebuild(h).unwrap();
         assert_eq!(r.metrics.frames, 1);
         assert!(r.reflectance.cells.is_empty());
+    }
+    #[test]
+    fn surface_validation_requires_independent_near_normal_views() {
+        let panel: HashSet<_> = (-10..=10).map(|y| (20, y)).collect();
+        let frames = |origins: &[[f64; 2]]| {
+            origins
+                .iter()
+                .enumerate()
+                .map(|(id, p)| Keyframe {
+                    id: id as u64,
+                    pose: Pose {
+                        x: p[0],
+                        y: p[1],
+                        theta: 0.,
+                    },
+                    points: panel.iter().map(|&k| center(k)).collect(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut repeated = panel.clone();
+        validate_surfaces(&mut repeated, &frames(&[[0., 0.]; 100]));
+        assert!(
+            repeated.is_empty(),
+            "stationary repetition is not independent evidence"
+        );
+        let mut grazing = panel.clone();
+        validate_surfaces(&mut grazing, &frames(&[[1., -2.], [1., -2.3], [1., -2.6]]));
+        assert!(
+            grazing.is_empty(),
+            "grazing clutter is not a normal reflection lobe"
+        );
+        let mut supported = panel.clone();
+        validate_surfaces(&mut supported, &frames(&[[0., -0.2], [0., 0.], [0., 0.2]]));
+        assert!(supported.contains(&(20, 0)));
+        let mut scattered = HashSet::from([(20, 0), (22, 4), (25, 1), (27, 6), (19, -5)]);
+        validate_surfaces(&mut scattered, &frames(&[[0., -0.2], [0., 0.], [0., 0.2]]));
+        assert!(scattered.is_empty());
     }
     #[test]
     fn directional_panel_removes_coherent_ghosts_but_not_adjacent_doorway() {

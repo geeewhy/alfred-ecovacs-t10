@@ -534,7 +534,8 @@ impl LocalizationService {
         let reflections = self.reflectance.load(&map.config.map_id).await.ok();
         s.search = Some(tokio::task::spawn_blocking(move || {
             let mut modes = if global {
-                map.matcher.global(&points, &map.evidence)
+                map.matcher
+                    .global_with_reflections(&points, &map.evidence, reflections.as_deref())
             } else {
                 // Reflection removal is hypothesis-specific. Never erase a beam
                 // merely because it disagrees with one candidate location.
