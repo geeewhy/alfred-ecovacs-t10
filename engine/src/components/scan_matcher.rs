@@ -109,6 +109,25 @@ impl ScanMatcher {
         }
     }
     pub fn refine(&self, p: Pose, points: &[[f64; 2]], wide: bool) -> Hypothesis {
+        self.refine_with_prior(p, points, wide, false)
+    }
+    fn refine_with_prior(
+        &self,
+        p: Pose,
+        points: &[[f64; 2]],
+        wide: bool,
+        motion: bool,
+    ) -> Hypothesis {
+        let origin = p;
+        let objective = |h: Hypothesis| {
+            h.likelihood
+                - if motion {
+                    0.05 * ((h.pose.distance(origin) / 0.15).powi(2)
+                        + (wrap(h.pose.theta - origin.theta) / 0.15).powi(2))
+                } else {
+                    0.
+                }
+        };
         let mut best = self.score(p, points);
         let scales = if wide {
             vec![(0.10, 0.05, 3), (0.025, 0.0125, 3), (0.0125, 0.00625, 1)]
@@ -126,7 +145,7 @@ impl ScanMatcher {
                             theta: wrap(base.theta + da as f64 * a),
                         };
                         let v = self.score(p, points);
-                        if v.likelihood > best.likelihood {
+                        if objective(v) > objective(best) {
                             best = v
                         }
                     }
@@ -189,15 +208,25 @@ impl ScanMatcher {
         modes.truncate(8);
         modes
     }
+    #[cfg(test)]
     pub fn track(
         &self,
         priors: &[Hypothesis],
         points: &[[f64; 2]],
         evidence: &EvidenceMap,
     ) -> Vec<Hypothesis> {
+        self.track_window(priors, points, evidence, false)
+    }
+    pub fn track_window(
+        &self,
+        priors: &[Hypothesis],
+        points: &[[f64; 2]],
+        evidence: &EvidenceMap,
+        wide: bool,
+    ) -> Vec<Hypothesis> {
         let mut modes = Vec::new();
         for h in priors {
-            let mut fit = self.refine(h.pose, points, false);
+            let mut fit = self.refine_with_prior(h.pose, points, wide, true);
             let visibility = evidence.evaluate(fit.pose, points);
             fit.likelihood -= 0.5 * visibility.contradiction;
             if fit.agreement >= 0.65 && !visibility.tracking_lost {

@@ -74,10 +74,73 @@ struct Map {
     matcher: ScanMatcher,
     evidence: EvidenceMap,
 }
+const CONFIRM_SCANS: u8 = 4;
+#[derive(Clone, Copy)]
+struct MotionPrior {
+    pose: Pose,
+    travel: f64,
+    turn: f64,
+}
+impl MotionPrior {
+    fn new(pose: Pose) -> Self {
+        Self {
+            pose,
+            travel: 0.,
+            turn: 0.,
+        }
+    }
+    fn advance(&mut self, left: f64, right: f64) {
+        self.pose.advance(left, right);
+        self.travel += (left.abs() + right.abs()) / 2.;
+        self.turn += ((right - left) / 0.243).abs();
+    }
+    fn accepts(&self, pose: Pose) -> bool {
+        self.pose.distance(pose) <= (0.30 + 0.15 * self.travel).min(0.75)
+            && wrap(self.pose.theta - pose.theta).abs() <= (0.30 + 0.10 * self.turn).min(0.70)
+    }
+}
+#[derive(Default)]
+struct Consensus {
+    winner: Option<Pose>,
+    margins: VecDeque<f64>,
+}
+impl Consensus {
+    fn observe(&mut self, modes: &[Hypothesis]) -> Option<Hypothesis> {
+        let Some(best) = modes.first().copied().filter(|h| h.agreement >= 0.75) else {
+            *self = Self::default();
+            return None;
+        };
+        if !self.winner.is_some_and(|p| {
+            p.distance(best.pose) < 0.2 && wrap(p.theta - best.pose.theta).abs() < 0.2
+        }) {
+            self.margins.clear();
+        }
+        self.winner = Some(best.pose);
+        self.margins.push_back(
+            modes
+                .get(1)
+                .map_or(1., |next| best.likelihood - next.likelihood),
+        );
+        while self.margins.len() > 8 {
+            self.margins.pop_front();
+        }
+        let n = self.margins.len() as f64;
+        let mean = self.margins.iter().sum::<f64>() / n;
+        let deviation = (self.margins.iter().map(|m| (m - mean).powi(2)).sum::<f64>() / n).sqrt();
+        // No sqrt(n) confidence boost: successive stationary sweeps are correlated.
+        if n >= CONFIRM_SCANS as f64 && mean > 0.01 && mean > 2. * deviation {
+            Some(best)
+        } else {
+            None
+        }
+    }
+}
 struct State {
     map: Option<Arc<Map>>,
     generation: u64,
     pose: Option<Pose>,
+    consensus: Consensus,
+    anchor: Option<MotionPrior>,
     score: f64,
     matched: Option<Instant>,
     previous: Option<([f32; 2], f64)>,
@@ -101,6 +164,8 @@ impl Default for State {
             map: None,
             generation: 0,
             pose: None,
+            consensus: Consensus::default(),
+            anchor: None,
             score: 0.,
             matched: None,
             previous: None,
@@ -135,12 +200,65 @@ pub fn advance(p: Pose, from: Pose, to: Pose) -> Pose {
 fn invalidate(s: &mut State, message: &str) {
     s.generation += 1;
     s.modes.clear();
+    s.anchor = None;
+    s.consensus = Consensus::default();
     s.pose = None;
     s.matched = None;
     s.confirm = 0;
     s.message = message.into();
     // Keep the in-flight worker until it finishes; generation rejects its result.
     // spawn_blocking cannot be aborted once running. Never spawn overlapping searches.
+}
+fn accept_match(
+    s: &mut State,
+    generation: u64,
+    at: Pose,
+    observed: Instant,
+    modes: Vec<Hypothesis>,
+) {
+    if generation == s.generation {
+        s.modes = modes
+            .into_iter()
+            .map(|mut h| {
+                h.pose = advance(h.pose, at, s.odom);
+                h
+            })
+            .filter(|h| s.anchor.is_none_or(|anchor| anchor.accepts(h.pose)))
+            .collect();
+        let selected = if s.anchor.is_some() && s.confirm >= CONFIRM_SCANS {
+            s.consensus = Consensus::default();
+            unique(&s.modes)
+        } else {
+            s.consensus.observe(&s.modes)
+        };
+        if let Some(best) = selected {
+            let updated = best.pose;
+            s.confirm = if s.pose.is_some_and(|old| {
+                old.distance(updated) < 0.2 && wrap(old.theta - updated.theta).abs() < 0.2
+            }) {
+                (s.confirm + 1).min(CONFIRM_SCANS)
+            } else {
+                CONFIRM_SCANS
+            };
+            s.pose = Some(updated);
+            if s.confirm >= CONFIRM_SCANS {
+                s.anchor = Some(MotionPrior::new(updated));
+            }
+            s.score = best.agreement;
+            s.matched = Some(observed);
+            s.message = "Confirming position with a new scan".into();
+        } else {
+            s.pose = None;
+            s.confirm = 0;
+            s.matched = None;
+            s.message = if s.modes.is_empty() {
+                "Tracking lost; searching saved map"
+            } else {
+                "Comparing competing locations against new scans"
+            }
+            .into();
+        }
+    }
 }
 impl LocalizationService {
     pub async fn new(
@@ -223,7 +341,17 @@ impl LocalizationService {
         } else {
             None
         };
+        let anchor = if s
+            .map
+            .as_ref()
+            .is_some_and(|m| m.config.map_id == config.map_id)
+        {
+            s.anchor
+        } else {
+            None
+        };
         invalidate(&mut s, "Checking position against the updated map");
+        s.anchor = anchor;
         if let Some(p) = prior {
             s.modes = vec![Hypothesis {
                 pose: p,
@@ -252,7 +380,7 @@ impl LocalizationService {
         let fresh = age.is_some_and(|a| a < 1500)
             && wheels.age_ms.is_some_and(|a| a < 500)
             && scan.age_ms.is_some_and(|a| a < 750)
-            && s.confirm >= 2;
+            && s.confirm >= CONFIRM_SCANS;
         Status {
             map_id: s.map.as_ref().map(|m| m.config.map_id.clone()),
             revision: s.map.as_ref().map(|m| m.config.revision.clone()),
@@ -303,6 +431,12 @@ impl LocalizationService {
                 s.history.clear();
             } else {
                 s.odom.advance(dl, dr);
+                if let Some(winner) = &mut s.consensus.winner {
+                    winner.advance(dl, dr);
+                }
+                if let Some(anchor) = &mut s.anchor {
+                    anchor.advance(dl, dr);
+                }
                 for h in &mut s.modes {
                     h.pose.advance(dl, dr);
                 }
@@ -327,40 +461,7 @@ impl LocalizationService {
         if s.search.as_ref().is_some_and(|t| t.is_finished()) {
             let task = s.search.take().unwrap();
             if let Ok((generation, at, observed, modes)) = task.await {
-                if generation == s.generation {
-                    s.modes = modes
-                        .into_iter()
-                        .map(|mut h| {
-                            h.pose = advance(h.pose, at, s.odom);
-                            h
-                        })
-                        .collect();
-                    if let Some(best) = unique(&s.modes) {
-                        let updated = best.pose;
-                        s.confirm = if s.pose.is_some_and(|old| {
-                            old.distance(updated) < 0.2
-                                && wrap(old.theta - updated.theta).abs() < 0.2
-                        }) {
-                            (s.confirm + 1).min(2)
-                        } else {
-                            1
-                        };
-                        s.pose = Some(updated);
-                        s.score = best.agreement;
-                        s.matched = Some(observed);
-                        s.message = "Confirming position with a new scan".into();
-                    } else {
-                        s.pose = None;
-                        s.confirm = 0;
-                        s.matched = None;
-                        s.message = if s.modes.is_empty() {
-                            "Tracking lost; searching saved map"
-                        } else {
-                            "Comparing competing locations against new scans"
-                        }
-                        .into();
-                    }
-                }
+                accept_match(&mut s, generation, at, observed, modes);
             }
         }
         if s.search.is_some() || scan.sequence == s.sequence {
@@ -384,7 +485,10 @@ impl LocalizationService {
             s.message = "Waiting for LiDAR coverage".into();
             return;
         }
-        let seed = s.pose.map(|p| advance(p, s.odom, at));
+        let seed = s
+            .pose
+            .filter(|_| s.confirm >= CONFIRM_SCANS)
+            .map(|p| advance(p, s.odom, at));
         let priors: Vec<_> = s
             .modes
             .iter()
@@ -403,6 +507,19 @@ impl LocalizationService {
         } else {
             priors
         };
+        let priors = if priors.is_empty() {
+            s.anchor
+                .map(|anchor| {
+                    vec![Hypothesis {
+                        pose: advance(anchor.pose, s.odom, at),
+                        likelihood: 0.,
+                        agreement: 0.,
+                    }]
+                })
+                .unwrap_or_default()
+        } else {
+            priors
+        };
         let generation = s.generation;
         if priors.is_empty() && s.last_search.elapsed() < Duration::from_secs(1) {
             return;
@@ -413,6 +530,7 @@ impl LocalizationService {
             s.last_global = Instant::now();
         }
         s.last_search = Instant::now();
+        let recovery_window = seed.is_none() && s.anchor.is_some();
         let reflections = self.reflectance.load(&map.config.map_id).await.ok();
         s.search = Some(tokio::task::spawn_blocking(move || {
             let mut modes = if global {
@@ -432,7 +550,12 @@ impl LocalizationService {
                         })
                         .collect();
                     if filtered.len() >= 100 && filtered.len() * 3 >= points.len() {
-                        modes.extend(map.matcher.track(&[*prior], &filtered, &map.evidence));
+                        modes.extend(map.matcher.track_window(
+                            &[*prior],
+                            &filtered,
+                            &map.evidence,
+                            recovery_window,
+                        ));
                     }
                 }
                 consolidate(modes)
@@ -635,5 +758,153 @@ mod tests {
         let corrected = deskew(&scan, &h, 0.2).unwrap();
         assert!((corrected.points[0].x - 900.).abs() < 0.01);
         assert!((corrected.points[1].x - 1000.).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod continuity_tests {
+    use super::*;
+    fn candidate(x: f64, score: f64) -> Hypothesis {
+        Hypothesis {
+            pose: Pose {
+                x,
+                y: 1.,
+                theta: 0.,
+            },
+            likelihood: score,
+            agreement: 0.9,
+        }
+    }
+    fn update(s: &mut State, modes: Vec<Hypothesis>) {
+        accept_match(s, s.generation, s.odom, Instant::now(), modes);
+    }
+    #[test]
+    fn one_promising_scan_does_not_eliminate_the_competing_location() {
+        let mut s = State::default();
+        update(&mut s, vec![candidate(1., 0.9), candidate(8., 0.84)]);
+        assert_eq!(s.confirm, 0);
+        assert_eq!(s.modes.len(), 2);
+        assert!(s.anchor.is_none());
+        update(&mut s, vec![candidate(8., 0.9), candidate(1., 0.87)]);
+        assert_eq!(s.confirm, 0);
+        assert!(s.pose.is_none());
+        assert!(s.anchor.is_none());
+    }
+    #[test]
+    fn lost_scan_cannot_teleport_verified_position_to_another_room() {
+        let mut s = State::default();
+        for _ in 0..CONFIRM_SCANS {
+            update(&mut s, vec![candidate(1., 0.9), candidate(8., 0.8)]);
+        }
+        assert!(s.anchor.is_some());
+        update(&mut s, vec![]);
+        assert!(s.pose.is_none());
+        assert!(s.anchor.is_some());
+        for _ in 0..10 {
+            update(&mut s, vec![candidate(8., 0.99)]);
+        }
+        assert!(s.pose.is_none());
+        assert_eq!(s.confirm, 0);
+        for _ in 0..CONFIRM_SCANS {
+            update(&mut s, vec![candidate(1.1, 0.85)]);
+        }
+        assert_eq!(s.confirm, CONFIRM_SCANS);
+        assert!((s.pose.unwrap().x - 1.1).abs() < 1e-6);
+    }
+    #[test]
+    fn recovery_prior_moves_with_wheels_and_explicit_locate_can_reset_it() {
+        let mut s = State::default();
+        s.anchor = Some(MotionPrior::new(candidate(1., 0.9).pose));
+        s.anchor.as_mut().unwrap().advance(1., 1.);
+        assert!(s.anchor.unwrap().accepts(candidate(2.1, 0.8).pose));
+        assert!(!s.anchor.unwrap().accepts(candidate(8., 0.99).pose));
+        invalidate(&mut s, "explicit Locate");
+        assert!(s.anchor.is_none());
+        for _ in 0..CONFIRM_SCANS {
+            update(&mut s, vec![candidate(8., 0.99)]);
+        }
+        assert_eq!(s.confirm, CONFIRM_SCANS);
+    }
+}
+
+#[cfg(test)]
+mod consensus_tests {
+    use super::*;
+    fn hypotheses(x: f64, gap: f64) -> Vec<Hypothesis> {
+        vec![
+            Hypothesis {
+                pose: Pose {
+                    x,
+                    y: 0.,
+                    theta: 0.,
+                },
+                likelihood: 0.7,
+                agreement: 0.85,
+            },
+            Hypothesis {
+                pose: Pose {
+                    x: 10. - x,
+                    y: 0.,
+                    theta: 0.,
+                },
+                likelihood: 0.7 - gap,
+                agreement: 0.86,
+            },
+        ]
+    }
+    #[test]
+    fn persistent_lead_exceeding_scan_noise_can_resolve_without_fixed_large_margin() {
+        let mut c = Consensus::default();
+        let mut result = None;
+        for gap in [0.028, 0.032, 0.030, 0.029] {
+            result = c.observe(&hypotheses(1., gap));
+        }
+        assert!(result.is_some());
+    }
+    #[test]
+    fn equal_or_alternating_rooms_remain_unresolved() {
+        let mut equal = Consensus::default();
+        let mut alternating = Consensus::default();
+        for i in 0..20 {
+            assert!(equal.observe(&hypotheses(1., 0.)).is_none());
+            assert!(
+                alternating
+                    .observe(&hypotheses(if i % 2 == 0 { 1. } else { 9. }, 0.06))
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod recorded_consensus_test {
+    use super::*;
+    #[test]
+    fn recorded_stationary_mirror_candidates_resolve_without_room_switching() {
+        let rows: serde_json::Value = serde_json::from_str(include_str!(
+            "../../fixtures/mirror-candidate-sequence.json"
+        ))
+        .unwrap();
+        let mut s = State::default();
+        let mut accepted = 0;
+        for row in rows.as_array().unwrap() {
+            let modes = row["hypotheses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| Hypothesis {
+                    pose: serde_json::from_value(h["pose"].clone()).unwrap(),
+                    likelihood: h["likelihood"].as_f64().unwrap(),
+                    agreement: h["agreement"].as_f64().unwrap(),
+                })
+                .collect();
+            accept_match(&mut s, 0, Pose::default(), Instant::now(), modes);
+            if s.confirm >= CONFIRM_SCANS {
+                let p = s.pose.unwrap();
+                assert!((p.x - 8.77).hypot(p.y + 0.37) < 0.15);
+                accepted += 1;
+            }
+        }
+        assert!(accepted > 5, "recorded persistent winner should resolve");
     }
 }
