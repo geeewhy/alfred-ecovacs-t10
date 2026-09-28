@@ -54,6 +54,12 @@ pub struct Geometry {
 }
 impl Geometry {
     pub fn new(map: ReturnMap) -> Result<Self, String> {
+        Self::build(map, true)
+    }
+    pub fn localization(map: ReturnMap) -> Result<Self, String> {
+        Self::build(map, false)
+    }
+    fn build(map: ReturnMap, docking: bool) -> Result<Self, String> {
         let n = map
             .width
             .checked_mul(map.height)
@@ -68,7 +74,7 @@ impl Geometry {
             || [map.station.x, map.station.y, map.station.theta]
                 .iter()
                 .any(|x| !x.is_finite())
-            || map.enclosure.len() < 30
+            || (docking && map.enclosure.len() < 30)
             || map.enclosure.len() > 5000
             || map
                 .enclosure

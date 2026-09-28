@@ -15,3 +15,6 @@ pub mod return_to_station;
 pub mod reflectance;
 
 pub mod map_evidence;
+
+pub mod localization;
+pub mod scan_matcher;

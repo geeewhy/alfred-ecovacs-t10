@@ -42,9 +42,6 @@ impl Default for ReturnStatus {
 struct Operation {
     status: ReturnStatus,
     started: Instant,
-    previous: Option<([f32; 2], f64)>,
-    last_scan: u32,
-    last_match: Option<Instant>,
     lost: Option<Instant>,
     route: Vec<Pose>,
     reseat: bool,
@@ -52,16 +49,12 @@ struct Operation {
     contact: Option<Instant>,
     progress: Option<(Instant, Pose)>,
     boot: String,
-    search: Option<tokio::task::JoinHandle<Option<(Pose, f64)>>>,
 }
 impl Operation {
     fn cancel(&mut self) {
         self.status.active = false;
         self.status.state = "stopped".into();
         self.status.message = "Engine return stopped".into();
-        if let Some(task) = self.search.take() {
-            task.abort();
-        }
     }
 }
 impl Default for Operation {
@@ -69,9 +62,6 @@ impl Default for Operation {
         Self {
             status: ReturnStatus::default(),
             started: Instant::now(),
-            previous: None,
-            last_scan: 0,
-            last_match: None,
             lost: None,
             route: Vec::new(),
             reseat: false,
@@ -79,12 +69,12 @@ impl Default for Operation {
             contact: None,
             progress: None,
             boot: String::new(),
-            search: None,
         }
     }
 }
 pub struct ReturnService {
     pub gate: Mutex<()>,
+    localization: Arc<super::localization::LocalizationService>,
     operation: Mutex<Operation>,
     geometry: RwLock<Option<Arc<Geometry>>>,
     reflectance: Arc<super::reflectance::ReflectanceService>,
@@ -101,6 +91,7 @@ impl ReturnService {
         mapping: Arc<NativeMapping>,
         bumpers: Arc<BumperTelemetry>,
         reflectance: Arc<super::reflectance::ReflectanceService>,
+        localization: Arc<super::localization::LocalizationService>,
     ) -> Arc<Self> {
         let geometry = tokio::fs::read(CONFIG)
             .await
@@ -109,6 +100,7 @@ impl ReturnService {
             .and_then(|m| Geometry::new(m).ok())
             .map(Arc::new);
         let service = Arc::new(Self {
+            localization,
             reflectance,
             gate: Mutex::new(()),
             operation: Mutex::new(Operation::default()),
@@ -175,6 +167,9 @@ impl ReturnService {
         tokio::fs::rename(format!("{CONFIG}.new"), CONFIG)
             .await
             .map_err(|e| e.to_string())?;
+        self.localization
+            .install(super::localization::Config::from_return(&geometry.map))
+            .await?;
         *self.geometry.write().await = Some(geometry);
         *self.operation.lock().await = Operation::default();
         Ok(())
@@ -187,6 +182,12 @@ impl ReturnService {
             return Err("Install a return map first".into());
         }
         let map = self.geometry.read().await.as_ref().unwrap().map.clone();
+        let location = self.localization.status().await;
+        if location.map_id.as_deref() != Some(&map.map_id) {
+            self.localization
+                .install(super::localization::Config::from_return(&map))
+                .await?;
+        }
         let reflections = self.reflectance.load(&map.map_id).await?;
         *self.geometry.write().await = Some(Arc::new(Geometry::with_reflections(
             map,
@@ -323,78 +324,19 @@ impl ReturnService {
             return;
         }
         let geometry = self.geometry.read().await.clone().unwrap();
-        let wheels = [native.wheels.values[0], native.wheels.values[1]];
-        if let Some((previous, stamp)) = op.previous {
-            let dl = (wheels[0] - previous[0]) as f64 / 1000.;
-            let dr = (wheels[1] - previous[1]) as f64 / 1000.;
-            if native.wheels.stamp < stamp || dl.abs() > 0.20 || dr.abs() > 0.20 {
-                self.fail(&mut op, "Wheel odometry discontinuity").await;
-                return;
-            }
-            if let Some(p) = op.status.pose.as_mut() {
-                p.advance(dl, dr)
-            }
-        }
-        op.previous = Some((wheels, native.wheels.stamp));
-        if scan.sequence != op.last_scan {
-            op.last_scan = scan.sequence;
-            let points = scan_points(&scan);
-            if points.len() < 25 {
-                self.hold(&mut op, "Waiting for LiDAR coverage").await;
-                return;
-            }
-            if let Some(seed) = op.status.pose {
-                let (pose, score) = geometry.refine(seed, &points, false);
-                op.status.score = score;
-                // Inside the enclosure, room visibility falls away. A verified
-                // three-surface dock match can maintain position independently.
-                let near_points: Vec<[f64; 2]> = scan
-                    .points
-                    .iter()
-                    .filter(|p| p.power > 0. && (p.x as f64).hypot(p.y as f64) > 60.)
-                    .map(|p| [p.x as f64 / 1000., p.y as f64 / 1000.])
-                    .collect();
-                let dock_pose = geometry.refine_dock(seed, &near_points);
-                if let Some(dock_pose) = dock_pose {
-                    op.status.pose = Some(dock_pose);
-                    op.last_match = Some(Instant::now());
-                } else if score >= 0.72 {
-                    op.status.pose = Some(pose);
-                    op.last_match = Some(Instant::now());
-                }
-            } else {
-                op.status.state = "locating".into();
-                op.status.message = "Locating in saved map onboard".into();
-                let _ = self.drive.stop().await;
-                // This CPU search issues no motion and never depends on an external client.
-                if op.search.as_ref().is_some_and(|task| task.is_finished()) {
-                    let matched = op.search.take().unwrap().await.ok().flatten();
-                    if let Some((pose, score)) = matched {
-                        op.status.pose = Some(pose);
-                        op.status.score = score;
-                        // Require a new scan to corroborate before any motor command.
-                        op.last_match = None;
-                        op.previous = None;
-                        op.lost = None;
-                    } else {
-                        self.hold(&mut op, "Saved-map location is ambiguous; stopped")
-                            .await;
-                    }
-                } else if op.search.is_none() {
-                    let g = geometry.clone();
-                    op.search = Some(tokio::task::spawn_blocking(move || g.locate(&points)));
-                }
-                return;
-            }
-        }
-        if !op
-            .last_match
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(1))
+        let location = self.localization.status().await;
+        if location.map_id.as_deref() != Some(&geometry.map.map_id)
+            || location.state != "located"
+            || location.pose.is_none()
         {
-            self.hold(&mut op, "Waiting for a verified map position")
-                .await;
+            op.status.state = "locating".into();
+            op.status.pose = None;
+            op.status.message = location.message;
+            let _ = self.drive.stop().await;
             return;
         }
+        op.status.pose = location.pose;
+        op.status.score = location.score;
         let pose = op.status.pose.unwrap();
         let station = geometry.map.station;
         let local = station.relative(pose);
@@ -497,23 +439,6 @@ impl ReturnService {
         }
     }
 }
-fn scan_points(scan: &LidarScan) -> Vec<[f64; 2]> {
-    let points: Vec<_> = scan
-        .points
-        .iter()
-        .filter(|p| {
-            p.power > 0.
-                && (p.x as f64).hypot(p.y as f64) > 0.25 * 1000.
-                && (p.x as f64).hypot(p.y as f64) < 6000.
-        })
-        .map(|p| [p.x as f64 / 1000., p.y as f64 / 1000.])
-        .collect();
-    points
-        .iter()
-        .step_by((points.len() / 120).max(1))
-        .copied()
-        .collect()
-}
 fn obstructed(scan: &LidarScan, g: &Geometry, pose: Pose, v: f64, w: f64) -> bool {
     let station = g.map.station;
     let local = station.relative(pose);
@@ -566,16 +491,11 @@ mod tests {
             .unwrap()
     }
     #[tokio::test]
-    async fn cancellation_discards_pending_localization_and_restart_is_idle() {
+    async fn cancellation_stops_return_and_restart_is_idle() {
         let mut op = Operation::default();
         op.status.active = true;
-        op.search = Some(tokio::spawn(async {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            Some((Pose::default(), 1.))
-        }));
         op.cancel();
         assert!(!op.status.active);
-        assert!(op.search.is_none());
         assert!(!Operation::default().status.active);
     }
     #[test]

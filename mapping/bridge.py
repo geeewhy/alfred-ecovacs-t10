@@ -444,6 +444,7 @@ class Bridge(Node):
     def poll(self):
         try:
             frame=request('/v1/mapping/native/frame');status=frame['native'];wheels=status['wheels']
+            self.slam.engine_location=frame.get('localization');self.slam.engine_location_seen=time.monotonic()
             if self.robot_boot and self.robot_boot!=status['boot_id']:
                 self.control('pause',{});self.slam.capture=False;self.slam.locating=False;self.slam.location_token+=1;self.slam.pose_seen=0.
                 self.previous=None;self.odom=[0.,0.,0.];self.odom_epoch+=1;self.last_scan=None;self.scan_geometry=ScanGeometry()
@@ -472,6 +473,12 @@ class Bridge(Node):
             local=TransformStamped();local.header=odom.header;local.child_frame_id='base_link';local.transform.translation.x=self.odom[0];local.transform.translation.y=self.odom[1];quaternion(local.transform.rotation,self.odom[2])
             self.tf.sendTransform([local])
             mapped_pose=self.slam.pose()
+            if mapped_pose:
+                angle=wrap(mapped_pose['theta']-self.odom[2]);c=math.cos(angle);s=math.sin(angle)
+                transform=TransformStamped();transform.header.stamp=now;transform.header.frame_id='map';transform.child_frame_id='odom'
+                transform.transform.translation.x=mapped_pose['x']-c*self.odom[0]+s*self.odom[1]
+                transform.transform.translation.y=mapped_pose['y']-s*self.odom[0]-c*self.odom[1]
+                quaternion(transform.transform.rotation,angle);self.tf.sendTransform([transform])
             pose=mapped_pose or {'x':self.odom[0],'y':self.odom[1],'theta':self.odom[2],'age_ms':0}
             scan=frame['lidar']
             if scan['age_ms'] is None or scan['age_ms']>600:raise RuntimeError('LiDAR stale')

@@ -5,6 +5,7 @@ use crate::components::drive::{
     DriveService, DriveSettings, DriveState, DriveVector, MappingTwist,
 };
 use crate::components::lidar::{LidarScan, LidarTelemetry};
+use crate::components::localization::{Config as LocalizationConfig, LocalizationService};
 use crate::components::map_evidence::{EvidenceMap, Reference};
 use crate::components::mapping::{NativeMapping, NativeSnapshot};
 use crate::components::reflectance::{FilterRequest, Model, ReflectanceService};
@@ -27,6 +28,7 @@ const MAX_CLIP_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct HttpState {
+    localization: Arc<LocalizationService>,
     reference: Arc<tokio::sync::RwLock<Option<Arc<EvidenceMap>>>>,
     reflectance: Arc<ReflectanceService>,
     returning: Arc<ReturnService>,
@@ -84,15 +86,23 @@ impl HttpRuntime {
 
     pub async fn run(self) -> io::Result<()> {
         let reflectance = ReflectanceService::new("/data/alfred/state/reflectance");
+        let localization = LocalizationService::new(
+            self.lidar.clone(),
+            self.mapping.clone(),
+            reflectance.clone(),
+        )
+        .await;
         let returning = ReturnService::new(
             self.drive.clone(),
             self.lidar.clone(),
             self.mapping.clone(),
             self.bumpers.clone(),
             reflectance.clone(),
+            localization.clone(),
         )
         .await;
         let state = HttpState {
+            localization,
             reference: Arc::new(tokio::sync::RwLock::new(None)),
             reflectance,
             returning,
@@ -106,6 +116,11 @@ impl HttpRuntime {
         };
         let app = Router::new()
             .route("/health", get(health))
+            .route(
+                "/v1/localization",
+                get(localization_status).post(localization_start),
+            )
+            .route("/v1/localization/map", put(localization_install))
             .route("/v1/mapping/reference", put(reference_install))
             .route("/v1/mapping/evidence", post(reference_check))
             .route("/v1/mapping/reflectance/filter", post(reflection_filter))
@@ -590,7 +605,7 @@ async fn mapping_twist(
 
 async fn native_frame(State(state): State<HttpState>) -> Json<serde_json::Value> {
     Json(
-        serde_json::json!({"ok":true,"result":{"native":state.mapping.status().await,"lidar":state.lidar.current().await,"bumpers":state.bumpers.current()}}),
+        serde_json::json!({"ok":true,"result":{"native":state.mapping.status().await,"lidar":state.lidar.current().await,"bumpers":state.bumpers.current(),"localization":state.localization.status().await}}),
     )
 }
 
@@ -799,4 +814,55 @@ async fn reference_check(
             Json(serde_json::json!({"ok":false,"error":e})),
         ),
     }
+}
+
+async fn localization_status(State(state): State<HttpState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({"ok":true,"result":state.localization.status().await}))
+}
+async fn localization_install(
+    State(state): State<HttpState>,
+    Json(config): Json<LocalizationConfig>,
+) -> impl IntoResponse {
+    let _gate = state.returning.gate.lock().await;
+    if state.returning.active().await {
+        return result(Err("Stop return before replacing localization map".into()));
+    }
+    result(
+        state
+            .localization
+            .install(config)
+            .await
+            .map(|_| "Localization map installed".into()),
+    )
+}
+#[derive(serde::Deserialize)]
+struct LocateRequest {
+    map_id: String,
+}
+async fn localization_start(
+    State(state): State<HttpState>,
+    Json(request): Json<LocateRequest>,
+) -> impl IntoResponse {
+    let _gate = state.returning.gate.lock().await;
+    if state.returning.active().await {
+        return result(Err("Stop return before resetting localization".into()));
+    }
+    if !state
+        .lidar
+        .current()
+        .await
+        .age_ms
+        .is_some_and(|age| age < 750)
+    {
+        if let Err(error) = fixed_command("python", &["/data/alfred/lidar_start.py"]).await {
+            return result(Err(error));
+        }
+    }
+    result(
+        state
+            .localization
+            .locate(&request.map_id)
+            .await
+            .map(|_| "Engine localization started".into()),
+    )
 }

@@ -108,10 +108,10 @@ export class MapService {
     // autonomous heartbeat/ownership paths. Both calls are read-only.
     if (!this.positionTask || performance.now() - this.positionAt > 120) {
       this.positionAt = performance.now();
-      this.positionTask = Promise.allSettled([this.engine.onboardReturn(), this.navigation.call("status")]);
+      this.positionTask = Promise.allSettled([this.engine.onboardReturn(), this.engine.localization()]);
     }
     const [engine, nav] = await this.positionTask;
-    return livePosition(id, engine.status==='fulfilled'?engine.value:null, nav.status==='fulfilled'?nav.value:null);
+    return livePosition(id, engine.status==='fulfilled'?engine.value:null, null, nav.status==='fulfilled'?nav.value:null);
   }
   async remove(id) {
     this.path(id);
@@ -513,6 +513,7 @@ export class MapService {
     this.timer?.unref();
   }
   async tick() {
+    if(this.active?.engineLocate)return this.engineLocateTick();
     if(this.active?.scanner.backend === "slam_toolbox") return this.graphTick();
     if(this.active?.scanner.backend === "native") return this.nativeTick();
     await this.serial(async () => {
@@ -636,8 +637,40 @@ export class MapService {
       if(active.stationRequested)active.status.message="Position found. Station detection unavailable; marker not updated.";
     }
   }
+  async locateOnboard(m,options,requestedEpoch){
+    if(this.active?.id===m.id && this.active.engineLocate && this.active.status.state==="locating")return this.get(m.id);
+    if(this.active && ["scanning","locating"].includes(this.active.status.state))throw Error("Pause the current scan first.");
+    const grid=m.checkpoint?.nativeGrid;
+    if(!grid?.cells?.length)throw Error("Saved map grid unavailable.");
+    await this.engine.wakeForMapping(options.signal);
+    options.signal?.throwIfAborted();if(this.epoch!==requestedEpoch)throw Error("Scan cancelled.");
+    await this.engine.localization("map",{map_id:m.id,revision:String(m.revision),grid});
+    options.signal?.throwIfAborted();if(this.epoch!==requestedEpoch)throw Error("Scan cancelled.");
+    await this.engine.localization("locate",{map_id:m.id});
+    options.signal?.throwIfAborted();if(this.epoch!==requestedEpoch)throw Error("Scan cancelled.");
+    this.active={id:m.id,scanner:new GraphScanner(m.checkpoint),station:m.station,engineLocate:true,status:{...m.scan,state:"locating",localization:"locating",pose:null,error:null,message:"Engine is locating Alfred"}};
+    this.epoch++;this.schedule();return this.get(m.id);
+  }
+  async engineLocateTick(){
+    const a=this.active;if(!a?.engineLocate)return;
+    try{
+      const location=await this.engine.localization();
+      if(this.active!==a)return;
+      a.status.message=location.message;
+      if(location.map_id===a.id && location.state==="located" && location.pose){
+        a.status={...a.status,state:"paused",localization:"located",pose:location.pose,error:null,message:"Position tracked by engine"};
+        const m=await this.load(a.id);m.scan={...a.status};await this.save(m);
+      }
+    }catch(error){if(this.active===a)a.status.message=error.message;}
+    this.schedule();
+  }
   async graphScan(m,action,options,requestedEpoch){
     const id=m.id;
+    if(action==="locate" && !options.station && typeof this.engine.localization==="function")return this.locateOnboard(m,options,requestedEpoch);
+    if(this.active?.engineLocate && ["pause","finish"].includes(action)){
+      this.active.status.state="paused";this.active.status.localization="cancelled";this.active.status.message="Map view paused; engine tracking continues";
+      clearTimeout(this.timer);return this.get(id);
+    }
     if(["pause","finish"].includes(action)){
       try{await this.navigation.call("mapping/pause");}finally{await this.engine.stop();}
       if(this.active?.id===id){
@@ -738,7 +771,7 @@ export class MapService {
           if(nav.mapping.location.state!=="located" || (a.status.mode!=="manual" && !nav.ready) || !nav.mapping.pose){
             a.locatingSince ||= Date.now();
             a.status.message=nav.mapping.location.state==="located" ? (nav.mapping.tracking_error || nav.message || "Starting navigation") : nav.mapping.location.message;
-            if(Date.now()-a.locatingSince>(a.pendingAction==="locate" || a.returnPending?75000:25000))throw Error(`${a.status.message}. Preparation timed out; scan paused.`);
+            if(nav.mapping.location.source!=="engine" && Date.now()-a.locatingSince>(a.pendingAction==="locate" || a.returnPending?75000:25000))throw Error(`${a.status.message}. Preparation timed out; scan paused.`);
             return;
           }
           if(nav.mapping.map_id!==a.id)throw Error("Localized map does not match this scan.");

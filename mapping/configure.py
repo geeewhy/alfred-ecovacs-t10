@@ -32,5 +32,5 @@ p['alfred_localization_lifecycle']={'ros__parameters':{'autostart':True,'node_na
 yaml.safe_dump(p,open('/tmp/alfred-nav2.yaml','w'))
 
 slam=yaml.safe_load(open('/alfred/slam-upstream.yaml'))
-slam['slam_toolbox']['ros__parameters'].update(base_frame='base_link',map_update_interval=1.,minimum_time_interval=.15,minimum_travel_distance=.1,minimum_travel_heading=.15,scan_buffer_size=30,loop_match_minimum_chain_size=10,max_laser_range=12.,min_laser_range=.195,transform_timeout=.3,enable_interactive_mode=False,check_min_dist_and_heading_precisely=True,restamp_tf=True,correlation_search_space_dimension=.2,coarse_search_angle_offset=.15,use_response_expansion=False)
+slam['slam_toolbox']['ros__parameters'].update(base_frame='base_link',transform_publish_period=0.,map_update_interval=1.,minimum_time_interval=.15,minimum_travel_distance=.1,minimum_travel_heading=.15,scan_buffer_size=30,loop_match_minimum_chain_size=10,max_laser_range=12.,min_laser_range=.195,transform_timeout=.3,enable_interactive_mode=False,check_min_dist_and_heading_precisely=True,restamp_tf=True,correlation_search_space_dimension=.2,coarse_search_angle_offset=.15,use_response_expansion=False)
 yaml.safe_dump(slam,open('/tmp/alfred-slam.yaml','w'))

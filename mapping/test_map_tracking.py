@@ -10,12 +10,12 @@ class Tracking(unittest.TestCase):
  def session(self):
   tree=ast.parse(Path(__file__).with_name('slam_session.py').read_text())
   cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='SlamSession')
-  names={'scan','pose_update','recover_tracking','map_evidence','save_locked'}
+  names={'builder_agrees','scan','pose_update','recover_tracking','map_evidence','save_locked'}
   cls.body=[n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name in names]
   env={'advance_pose':advance_pose,'math':math,'time':time,'threading':NS(Thread=Mock())}
   exec(compile(ast.Module(body=[cls],type_ignores=[]),'slam_session.py','exec'),env)
   obj=env['SlamSession']();obj.node=NS(odom=[99.,99.,0.],scan_pub=Mock(),engine_request=Mock(),control=Mock())
-  obj.last_pose=None;obj.scan_odometry=OrderedDict();obj.reference_manifest={'filename':'good','grid':{'cells':[]}};obj.location={'state':'located'};obj.map_id='map';obj.capture=True;obj.locating=False;obj.location_token=4;obj.quality_hold=False;obj.map_evidence=Mock(return_value={'tracking_lost':False});obj.recovery_count=0
+  obj.engine_enabled=False;obj.last_pose=None;obj.scan_odometry=OrderedDict();obj.reference_manifest={'filename':'good','grid':{'cells':[]}};obj.location={'state':'located'};obj.map_id='map';obj.capture=True;obj.locating=False;obj.location_token=4;obj.quality_hold=False;obj.map_evidence=Mock(return_value={'tracking_lost':False});obj.recovery_count=0
   return obj,env
  def scan(self):return NS(header=NS(stamp=NS(sec=7,nanosec=5)),angle_min=0.,angle_increment=.01,ranges=[1.]*120,range_min=.2,range_max=12.)
  def test_bad_scan_is_not_published_and_reference_is_preserved(self):
@@ -48,5 +48,12 @@ class Tracking(unittest.TestCase):
   o.node.scan_pub.publish.assert_not_called();self.assertTrue(o.quality_hold)
  def test_no_projection_recovers_instead_of_silently_starving_slam(self):
   o,e=self.session();o.scan(self.scan(),1,None,(1.,2.,0.))
+  o.node.scan_pub.publish.assert_not_called();self.assertTrue(o.quality_hold)
+  e['threading'].Thread.assert_called_once()
+
+ def test_engine_builder_disagreement_blocks_insertion_before_map_write(self):
+  o,e=self.session();o.engine_enabled=True;o.pose=Mock(return_value={'x':4.,'y':2.,'theta':0.})
+  o.last_pose={'x':8.,'y':2.,'theta':0.};o.odom_at_pose=(1.,2.,0.)
+  o.scan(self.scan(),1,{'x':4.,'y':2.,'theta':0.},(1.,2.,0.))
   o.node.scan_pub.publish.assert_not_called();self.assertTrue(o.quality_hold)
   e['threading'].Thread.assert_called_once()

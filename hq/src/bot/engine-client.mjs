@@ -5,6 +5,13 @@ export class EngineClient {
     this.token = token;
   }
 
+  async localization(action="status",body) {
+    const response=await this.request(action==="map"?"/v1/localization/map":"/v1/localization",8000,{method:action==="status"?"GET":action==="map"?"PUT":"POST",headers:{"content-type":"application/json"},...(body?{body:JSON.stringify(body)}:{})});
+    const value=await response.json();
+    if(!response.ok || !value.ok)throw Error(value.error||value.result||"Engine localization unavailable");
+    return value.result;
+  }
+
   async onboardReturn(action="status", body) {
     const path=action==="config"?"/v1/return/config":action==="stop"?"/v1/return/stop":"/v1/return";
     const response=await this.request(path,8000,{method:action==="status"?"GET":action==="config"?"PUT":"POST",headers:{"content-type":"application/json"},...(body?{body:JSON.stringify(body)}:{})});
