@@ -25,6 +25,7 @@ impl BatterySnapshotSource for NativeBatterySnapshot {
     async fn read(&self) -> Result<BatterySnapshot, String> {
         let output = Command::new("/usr/bin/mdsctl")
             .args(["rosnode", r#"{"todo":"rtctl","cmd":"getBatteryInfo"}"#])
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(|error| format!("cannot query native battery snapshot: {error}"))?;

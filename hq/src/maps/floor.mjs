@@ -2,7 +2,7 @@ import clipping from 'polygon-clipping';
 
 // The connected observed floor is separate from wall evidence. In particular,
 // an edge against unobserved space is an unfinished boundary, never a new wall.
-export function floorGeometry(cells,axis=0,walls=[]) {
+export function floorGeometry(cells,axis=0,walls=[],poses=null) {
  const size=.1,c=Math.cos(axis||0),s=Math.sin(axis||0),counts=new Map();
  const key=(x,y)=>`${x},${y}`;
  for(const [ix,iy,v] of cells){
@@ -50,6 +50,11 @@ export function floorGeometry(cells,axis=0,walls=[]) {
  geometry=geometry.length?clipping.union(...geometry):[];
  const world=([x,y])=>[x*c-y*s,x*s+y*c];
  geometry=geometry.map(p=>p.map(r=>r.map(world)));
+ if(poses?.length){
+  const inside=(p,r)=>{let yes=false;for(let i=0,j=r.length-1;i<r.length;j=i++){const a=r[i],b=r[j];if((a[1]>p.y)!=(b[1]>p.y)&&p.x<(b[0]-a[0])*(p.y-a[1])/(b[1]-a[1])+a[0])yes=!yes;}return yes;};
+  const visited=geometry.filter(p=>poses.some(q=>inside(q,p[0])&&!p.slice(1).some(r=>inside(q,r))));
+  if(visited.length)geometry=visited;
+ }
  const occupied=new Set(cells.filter(q=>q[2]>=2).map(([x,y])=>key(x,y)));
  const boundary=[];
  const structural=walls.filter(([a,b])=>{
@@ -68,7 +73,7 @@ export function floorGeometry(cells,axis=0,walls=[]) {
    if(hit)hits++;
    if(nearWall([a[0]+t*(b[0]-a[0]),a[1]+t*(b[1]-a[1])]))wallHits++;
   }
-  boundary.push({points:[a,b],kind:hits/n<.65?'unobserved':ringIndex===0&&wallHits/n>=.7?'wall':'obstacle'});
+  boundary.push({points:[a,b],kind:ringIndex===0&&wallHits/n>=.7?'wall':hits/n>=.65?'obstacle':'unobserved'});
  }
  const area=geometry.reduce((sum,p)=>sum+Math.abs(signed(p[0]))-p.slice(1).reduce((s,r)=>s+Math.abs(signed(r)),0),0);
  return {geometry,boundary,area};

@@ -1,14 +1,44 @@
 import { diagnosticState } from "../infra/diagnostics.mjs";
 export class EngineClient {
-  constructor(adbClient, localPort, remotePort = 8765) {
-    this.adbClient = adbClient;
-    this.localPort = localPort;
-    this.remotePort = remotePort;
-    this.baseUrl = `http://127.0.0.1:${localPort}`;
+  constructor(baseUrl, token) {
+    this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.token = token;
+  }
+
+  async onboardReturn(action="status", body) {
+    const path=action==="config"?"/v1/return/config":action==="stop"?"/v1/return/stop":"/v1/return";
+    const response=await this.request(path,8000,{method:action==="status"?"GET":action==="config"?"PUT":"POST",headers:{"content-type":"application/json"},...(body?{body:JSON.stringify(body)}:{})});
+    const value=await response.json();
+    if(!response.ok || !value.ok)throw Error(value.result||"Engine return unavailable");
+    return value.result;
   }
 
   async connect() {
-    await this.adbClient.forward(this.localPort, this.remotePort);
+    const response=await this.request("/health");
+    if(!response.ok)throw Error(`Engine health returned ${response.status}`);
+  }
+  async dockStatus() {
+    const requestedAt=Date.now();
+    const response=await this.request("/v1/telemetry/dock",800);
+    const value=await response.json();
+    if(!response.ok || !value.ok)throw Error(value.result||"Dock telemetry unavailable");
+    // This endpoint performs a fresh native query. Use its request start in
+    // the host clock domain, conservatively including the full round trip.
+    return {...value.result,sourceObservedAt:value.result.observedAt,observedAt:requestedAt};
+  }
+  async systemStatus() {
+    const response=await this.request("/v1/system/status",7000);
+    const value=await response.json();
+    if(!response.ok || !value.ok)throw Error(value.result||"System telemetry unavailable");
+    return value.result;
+  }
+  async stopNativeReturn() {
+    const response=await this.request("/v1/drive/native-return/stop",7000,{method:"POST"});
+    const value=await response.json();
+    const line=typeof value.result==="string" && value.result.split('\n').find(line=>line.startsWith('ALFRED_MAP_JSON:'));
+    const result=line && JSON.parse(line.slice('ALFRED_MAP_JSON:'.length));
+    if(!response.ok || !value.ok || !result?.accepted)throw Error(result?.message||value.result||"Native return did not stop");
+    return result;
   }
 
   async bumpers() {
@@ -47,7 +77,7 @@ export class EngineClient {
   }
 
   async mappingDrive(vector) {
-    const response = await fetch(`${this.baseUrl}/v1/mapping/drive`, {
+    const response = await this.request("/v1/mapping/drive",250, {
       method: "PUT", headers: {"content-type":"application/json"},
       body: JSON.stringify(vector), signal: AbortSignal.timeout(250),
     });
@@ -57,25 +87,39 @@ export class EngineClient {
   }
 
   async wakeForMapping(signal) {
-    // A robot reboot removes adb forwards while shell/status can already be
-    // online again. Restore transport before sending any mapping mutation.
+    // Check the direct engine connection before requesting wake.
     signal?.throwIfAborted();
     try { await this.connect(); }
     catch (error) { throw Error(`Cannot reach Alfred's engine: ${error.message}`); }
     for(let attempt=0;attempt<5;attempt++){
       signal?.throwIfAborted();
-      const response=await fetch(this.baseUrl+'/v1/drive/wake',{method:'POST',signal:AbortSignal.timeout(1500)});
+      const response=await this.request('/v1/drive/wake',1500,{method:'POST'});
       const value=await response.json();
-      if(response.ok&&value.ok)return;
+      if(response.ok&&value.ok){await this.ensureMappingLidar(signal);return {woke:attempt>0};}
       if(!/waking|wake check/i.test(value.result||''))throw Error(value.result||'Robot wake failed');
       await new Promise(resolve=>setTimeout(resolve,250));
     }
     throw Error('Robot did not wake in time.');
   }
+  async ensureMappingLidar(signal) {
+    const first=(await this.lidar()).result;
+    if(Number.isFinite(first?.age_ms)&&first.age_ms<=750)return;
+    // Firmware may be awake while its docked LiDAR remains powered down.
+    signal?.throwIfAborted();
+    const response=await this.request('/v1/drive/lidar-wake',7000,{method:'POST'});
+    if(!response.ok)throw Error('LiDAR wake failed');
+    for(let attempt=0;attempt<5;attempt++){
+      signal?.throwIfAborted();
+      const scan=(await this.lidar()).result;
+      if(scan?.sequence!==first?.sequence && Number.isFinite(scan?.age_ms)&&scan.age_ms<=750)return;
+      await new Promise(resolve=>setTimeout(resolve,1000));
+    }
+    throw Error('LiDAR did not resume fresh scans. Position search has not started.');
+  }
   async nativeMapping(action, body) {
     const path = `/v1/mapping/native/${action}`;
     // Never retry a control mutation whose delivery might have succeeded.
-    const response = await fetch(this.baseUrl+path, {method:['grid','status','snapshot'].includes(action)?'GET':'POST',headers:body?{'content-type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(action==='load'?5000:1500)});
+    const response = await this.request(path,action==='load'?5000:1500, {method:['grid','status','snapshot'].includes(action)?'GET':'POST',headers:body?{'content-type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(action==='load'?5000:1500)});
     const value=await response.json();
     if(!response.ok||!value.ok)throw Error(value.result||'Native mapping request failed');
     return value.result;
@@ -88,26 +132,19 @@ export class EngineClient {
   }
 
   async request(path, timeoutMs = 2_000, options = {}) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    if(!this.token)throw Error("Engine credential is not installed");
     try {
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        ...options,
-        cache: "no-store",
-        signal: controller.signal,
+      const headers=new Headers(options.headers);
+      headers.set("Authorization",`Bearer ${this.token}`);
+      const response=await fetch(`${this.baseUrl}${path}`,{
+        ...options,headers,cache:"no-store",signal:AbortSignal.timeout(timeoutMs),
       });
-      diagnosticState("engine-http", "connected");
+      diagnosticState("engine-http",response.ok?"connected":"rejected",{status:response.status});
       return response;
-    } catch (error) {
-      diagnosticState("engine-http", "unreachable", { error: error.message });
-      await this.connect();
-      return fetch(`${this.baseUrl}${path}`, {
-        ...options,
-        cache: "no-store",
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-    } finally {
-      clearTimeout(timeout);
+    } catch(error) {
+      diagnosticState("engine-http","unreachable",{error:error.message});
+      // Never replay a mutation or switch transports after uncertain delivery.
+      throw error;
     }
   }
 }

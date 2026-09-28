@@ -8,3 +8,10 @@ pub mod mapping;
 pub mod power;
 pub mod ros;
 pub mod telemetry;
+
+pub mod return_geometry;
+pub mod return_to_station;
+
+pub mod reflectance;
+
+pub mod map_evidence;

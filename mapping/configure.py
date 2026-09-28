@@ -19,8 +19,8 @@ c['FollowPath']={
 for name in ['local_costmap','global_costmap']:
  c=p[name][name]['ros__parameters'];c['robot_radius']=.18;c['footprint_padding']=.005
  if name=='local_costmap':c['resolution']=.02;c['plugins']=(['static_layer'] if name=='global_costmap' else [])+['obstacle_layer','inflation_layer'];c['transform_tolerance']=.3
- c['static_layer']={'plugin':'nav2_costmap_2d::StaticLayer','map_subscribe_transient_local':True}
- c['obstacle_layer']={'plugin':'nav2_costmap_2d::ObstacleLayer','enabled':True,'combination_method':0,'footprint_clearing_enabled':True,'observation_sources':'scan contacts','contacts':{'topic':'/bumper_contacts','data_type':'PointCloud2','marking':True,'clearing':False,'observation_persistence':30.,'max_obstacle_height':1.},'scan':{'topic':'/scan','max_obstacle_height':2.,'clearing':True,'marking':True,'data_type':'LaserScan','raytrace_max_range':8.,'raytrace_min_range':.06,'obstacle_max_range':5.,'obstacle_min_range':.195}}
+ c['static_layer']={'plugin':'nav2_costmap_2d::StaticLayer','map_subscribe_transient_local':True,'map_topic':'/navigation_map'}
+ c['obstacle_layer']={'plugin':'nav2_costmap_2d::ObstacleLayer','enabled':True,'combination_method':0,'footprint_clearing_enabled':True,'observation_sources':'scan contacts','contacts':{'topic':'/bumper_contacts','data_type':'PointCloud2','marking':True,'clearing':False,'observation_persistence':30.,'max_obstacle_height':1.},'scan':{'topic':'/obstacle_scan','max_obstacle_height':2.,'clearing':True,'marking':True,'data_type':'LaserScan','raytrace_max_range':8.,'raytrace_min_range':.06,'obstacle_max_range':5.,'obstacle_min_range':.195}}
  c['inflation_layer']={'plugin':'nav2_costmap_2d::InflationLayer','cost_scaling_factor':5.,'inflation_radius':.28}
 p['planner_server']['ros__parameters']['GridBased'].update(tolerance=.3,use_astar=True,allow_unknown=False)
 p['lifecycle_manager_navigation']={'ros__parameters':{'autostart':False,'node_names':['controller_server','planner_server','bt_navigator'],'bond_timeout':3.}}

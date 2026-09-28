@@ -10,6 +10,7 @@ def choose():
     devices=adb('devices')
     if CONFIG['usb_serial']+'\tdevice' in devices:return CONFIG['usb_serial']
     addr=CONFIG['wifi_address']+':5555'
+    if addr+'\tdevice' in devices:return addr
     if addr+'\toffline' in devices:adb('disconnect',addr)
     adb('connect',addr,timeout=3)
     if addr+'\tdevice' not in adb('devices'):raise RuntimeError('Robot unavailable or unauthorized')

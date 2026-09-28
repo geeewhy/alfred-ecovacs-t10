@@ -2,10 +2,15 @@
 # Authenticated USB + Wi-Fi ADB. /data persists; 10 KiB diagnostic logs persist across reboot.
 MODE="${1:-start}"
 case "$MODE" in
- stop) killall adbd alfred-engine; exit 0 ;;
+ stop) touch /data/alfred/adb-supervisor.disabled; killall adbd alfred-engine; exit 0 ;;
  start|usb) ;;
  *) exit 2 ;;
 esac
+# Reapply the opt-in, reversible contact-loss policy to each firmware process.
+# This never restarts firmware and does not depend on HQ or the engine.
+if [ -f /data/alfred/firmware/no-contact-return-live.enabled ]; then
+    python /data/alfred/firmware_policy.py supervise
+fi
 if [ -f /data/alfred/startup-sound.sh ]; then
     sh /data/alfred/startup-sound.sh
 fi
@@ -17,6 +22,9 @@ if [ -x /data/alfred/alfred-engine ] && ! pidof alfred-engine >/dev/null; then
         /data/alfred/alfred-engine </dev/null >>/tmp/alfred-engine.log 2>&1 &
     fi
 fi
+rm -f /data/alfred/adb-supervisor.disabled
+# Delay supervisor startup until the primary path has had time to launch adbd.
+( sleep 3; python /data/alfred/adb_supervisor.py ) </dev/null >/dev/null 2>&1 &
 pidof adbd >/dev/null && exit 0
 # Property names contain dots; use env, not shell export.
 ROLE=/sys/devices/platform/soc/b2000000.usb/b2000000.dwc3/role

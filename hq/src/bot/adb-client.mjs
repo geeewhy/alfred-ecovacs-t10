@@ -11,10 +11,19 @@ export class AdbClient {
     if (this.connecting) return this.connecting;
     this.connecting = (async () => {
       try {
+        // Query the host transport first. This firmware leaks a socket for each
+        // redundant `adb connect`, eventually killing adbd at its FD limit.
+        const state = await this.processRunner.run("adb", ["-s", this.address, "get-state"], { env: ADB_ENV, timeoutMs: 1500 });
+        if (state.code === 0 && state.stdout.trim() === "device") return;
+        if (/offline/i.test(state.stderr || ""))
+          await this.processRunner.run("adb", ["disconnect", this.address], { env: ADB_ENV, timeoutMs: 1500 });
         const result = await this.processRunner.run("adb", ["connect", this.address], { env: ADB_ENV, timeoutMs: 3500 });
         if (result.code !== 0 || !/^(already )?connected to /m.test(result.stdout)) throw new Error((result.stderr || result.stdout).trim() || 'ADB connection failed');
         diagnosticState('adb', 'connected', { address: this.address });
       } catch (error) {
+        if(process.platform==='darwin' && /No route to host/i.test(error.message)){
+          error.message+=' Check macOS Privacy & Security → Local Network access for Haicue and adb.';
+        }
         diagnosticState('adb', 'disconnected', { address: this.address, error: error.message });
         throw error;
       }

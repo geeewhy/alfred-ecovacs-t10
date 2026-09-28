@@ -102,7 +102,8 @@ def work():
  meta,data=topic('/task/WorkState')
  if not meta.get('message_definition','').replace('\r','').startswith('uint8 worktype\nuint8 subtype\nuint8 state\n') or len(data)<3:raise RuntimeError('Unsupported work-state schema')
  return {'type':bytearray(data)[0],'subtype':bytearray(data)[1],'state':bytearray(data)[2]}
-def control(action):
+def control(action,work_type=15):
+ if work_type!=15 and not (work_type==5 and action in ('start','stop')):raise ValueError('Only explicit return-to-station start/stop is supported outside mapping')
  name='/task/WorkManage'
  uri=master().lookupService(CALLER,name)[2];host,port=uri.split('://')[1].rstrip('/').rsplit(':',1)
  s=socket.create_connection((host,int(port)),2)
@@ -111,7 +112,7 @@ def control(action):
  finally:s.close()
  if meta.get('md5sum')!=WORK_MD5:raise RuntimeError('Unsupported live WorkManage schema: '+str(meta.get('md5sum')))
  # manage, workType, string, CleanWorkData, ExtraWorkData; no cleaning outputs.
- payload=struct.pack('<BBI',{'start':0,'stop':1,'pause':2,'resume':3}[action],15,0)+b'\0'*45+struct.pack('<IIBHhhII',0,0,2,0,0,0,0,0)
+ payload=struct.pack('<BBI',{'start':0,'stop':1,'pause':2,'resume':3}[action],work_type,0)+b'\0'*45+struct.pack('<IIBHhhII',0,0,2,0,0,0,0,0)
  s=socket.create_connection((host,int(port)),2)
  try:
   header(s,['callerid='+CALLER,'service='+name,'md5sum='+WORK_MD5,'persistent=0'])
@@ -125,6 +126,25 @@ def lease_read():
  try:
   with open(LEASE) as f:return json.load(f)
  except (IOError,ValueError):return {}
+
+def start_return():
+ state=work()
+ if state['state']!=0:raise RuntimeError('Stop the current firmware task before requesting docking')
+ result=control('start',5)
+ if not result['accepted']:return result
+ # WorkManage acknowledges dispatch, not scheduler admission. Missing dustbin
+ # and other native prerequisites can silently reject an acknowledged request.
+ deadline=time.time()+3
+ while time.time()<deadline:
+  state=work()
+  if state['type']==5 and state['state']!=0:
+   result.update(work=state,started=True,message='Returning to the station')
+   return result
+  if state['state']!=0:
+   raise RuntimeError('A different firmware task started; docking was not confirmed')
+  time.sleep(.2)
+ result.update(accepted=False,started=False,work=state,message='Firmware acknowledged docking but did not start. Check charging state, dustbin and firmware alerts.')
+ return result
 def lease_write(value):
  with open(LEASE+'.new','w') as f:json.dump(value,f)
  os.rename(LEASE+'.new',LEASE)
@@ -189,6 +209,14 @@ if __name__=='__main__':
   signal.alarm(8)
   if action=='snapshot':result=snapshot()
   elif action=='status':result=status()
+  elif action=='start-return':
+   result=start_return()
+  elif action=='stop-return':
+   state=work()
+   if state['state']==0:result={'accepted':True,'message':'Already idle','work':state}
+   elif state['type']!=5:raise RuntimeError('Robot is not returning to the station')
+   else:
+    result=control('stop',5);result['work']=work()
   elif action=='probe':
    # A STOP while idle validates control transport without starting motion.
    state=work()

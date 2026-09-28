@@ -105,6 +105,22 @@ function controlButton(label, symbol, className = "") {
   return `<button class="control ${className}" data-drive="${className}" type="button"><span>${symbol}</span><small>${label}</small></button>`;
 }
 
+function driveSettingsMarkup() { return `    <dialog id="drive-settings" aria-labelledby="settings-title">
+      <form id="drive-settings-form">
+        <header class="settings-heading"><h2 id="settings-title">Drive settings</h2><button type="button" id="close-drive-settings" class="settings-button" aria-label="Close settings">✕</button></header>
+        <p class="settings-description">Set full-throttle speeds. Shift reaches these limits immediately.</p>
+        <fieldset id="settings-fields" disabled>
+          <label for="max-speed">Maximum speed <span>Forward and reverse</span></label>
+          <div class="settings-input"><input id="max-speed" name="max_speed_mm_s" type="number" min="0" step="any" required><span>mm/s</span></div>
+          <label for="turn-speed">Turning speed <span>Wheel speed when turning in place</span></label>
+          <div class="settings-input"><input id="turn-speed" name="turn_speed_mm_s" type="number" min="0" step="any" required><span>mm/s</span></div>
+          <p class="settings-description">Enter positive speeds in mm/s.</p>
+        </fieldset>
+        <p id="settings-message" role="status" aria-live="polite">Loading settings…</p>
+        <footer class="settings-actions"><button type="button" id="cancel-drive-settings" class="settings-button">Cancel</button><button type="submit" id="save-drive-settings" class="settings-button primary" disabled>Save on robot</button></footer>
+      </form>
+    </dialog>`; }
+function drivePanelMarkup() { return `<div class="deck-title"><h2>Drive</h2><button class="settings-button" id="open-drive-settings" type="button">Settings</button><span id="drive-status">Ready</span></div><div class="dpad">${controlButton("Forward","↑","forward")}${controlButton("Left","←","left")}${controlButton("Stop","■","stop")}${controlButton("Right","→","right")}${controlButton("Reverse","↓","reverse")}</div><div class="control-readouts"><div><span>Throttle</span><strong id="drive-throttle">0%</strong></div><div><span>Wheels L / R</span><strong id="drive-wheels">0 / 0 mm/s</strong></div></div><p class="map-muted">Hold to drive · Arrow keys · Shift for full throttle</p>`; }
 function cockpit(robot) {
   return shell(`
     <header class="topbar"><span>Cockpit</span><div class="top-status"><span class="status-dot ${robot?.online ? "online" : "offline"}"></span>${robot?.online ? "Alfred online" : "Alfred offline"}</div></header>
@@ -121,8 +137,8 @@ function cockpit(robot) {
               </div>
             </section>
             <section class="sensor-panel lidar-panel">
-              <div class="viewport-head"><span>LIDAR</span><code id="lidar-status">CONNECTING</code></div>
-              <div class="sensor-surface lidar-surface"><canvas id="lidar-canvas"></canvas></div>
+              <div class="viewport-head"><span>LIDAR</span><button class="settings-button" id="lidar-wake" type="button" title="Wake Alfred and start LiDAR without driving">Wake LiDAR</button><code id="lidar-status">CONNECTING</code></div>
+              <div class="sensor-surface lidar-surface"><canvas id="lidar-canvas"></canvas></div><p id="lidar-wake-message" role="status" aria-live="polite" hidden></p>
             </section>
           </div>
           <div class="bumper-strip" aria-label="Front bumpers" role="status">
@@ -131,18 +147,7 @@ function cockpit(robot) {
           <div class="viewport-foot"><span>DBX53</span><span>${robot?.network?.address ?? "192.168.1.89"}</span><span>${robot?.system?.temperatureC ?? "—"} °C</span></div>
         </section>
         <aside class="control-deck">
-          <div class="deck-title"><h2>Drive</h2><button class="settings-button" id="open-drive-settings" type="button">Settings</button><span id="drive-status">Ready</span></div>
-          <div class="dpad">
-            ${controlButton("Forward", "↑", "forward")}
-            ${controlButton("Left", "←", "left")}
-            ${controlButton("Stop", "■", "stop")}
-            ${controlButton("Right", "→", "right")}
-            ${controlButton("Reverse", "↓", "reverse")}
-          </div>
-          <div class="control-readouts">
-            <div><span>Throttle</span><strong id="drive-throttle">0%</strong></div>
-            <div><span>Wheels L / R</span><strong id="drive-wheels">0 / 0 mm/s</strong></div>
-          </div>
+          ${drivePanelMarkup()}
           <form id="speech-form" class="speech-form">
             <div class="chat-controls"><label><input type="checkbox" id="chat-mode"> Chat mode</label><button type="button" class="settings-button" id="chat-history">History</button></div>
             <p id="microphone-status" class="microphone-status" role="status"></p>
@@ -162,21 +167,7 @@ function cockpit(robot) {
       <p id="chat-pending" role="status"></p>
       <form id="chat-compose"><label class="sr-only" for="chat-text">Message Alfred</label><textarea id="chat-text" rows="2" maxlength="1000" placeholder="Ask Alfred…" required></textarea><button id="chat-send" class="settings-button primary">Send</button></form>
     </dialog>
-    <dialog id="drive-settings" aria-labelledby="settings-title">
-      <form id="drive-settings-form">
-        <header class="settings-heading"><h2 id="settings-title">Drive settings</h2><button type="button" id="close-drive-settings" class="settings-button" aria-label="Close settings">✕</button></header>
-        <p class="settings-description">Set full-throttle speeds. Shift reaches these limits immediately.</p>
-        <fieldset id="settings-fields" disabled>
-          <label for="max-speed">Maximum speed <span>Forward and reverse</span></label>
-          <div class="settings-input"><input id="max-speed" name="max_speed_mm_s" type="number" min="0" step="any" required><span>mm/s</span></div>
-          <label for="turn-speed">Turning speed <span>Wheel speed when turning in place</span></label>
-          <div class="settings-input"><input id="turn-speed" name="turn_speed_mm_s" type="number" min="0" step="any" required><span>mm/s</span></div>
-          <p class="settings-description">Enter positive speeds in mm/s.</p>
-        </fieldset>
-        <p id="settings-message" role="status" aria-live="polite">Loading settings…</p>
-        <footer class="settings-actions"><button type="button" id="cancel-drive-settings" class="settings-button">Cancel</button><button type="submit" id="save-drive-settings" class="settings-button primary" disabled>Save on robot</button></footer>
-      </form>
-    </dialog>`, "cockpit");
+    ${driveSettingsMarkup()}`, "cockpit");
 }
 
 function settingsPage() {
@@ -349,6 +340,7 @@ const driveKeys = new Set();
 const drivePointers = new Map();
 let driveStartedAt = 0;
 let driveTimer = null;
+let pendingDriveStop = Promise.resolve();
 let lastDriveVector = { linear: 0, angular: 0 };
 let driveEpoch = 0;
 
@@ -358,7 +350,7 @@ function route() {
   const run = ++cockpitRun;
   document.body.classList.toggle("cockpit-mode", location.pathname === "/cockpit");
   document.body.classList.toggle("maps-mode", location.pathname === "/maps");
-  app.innerHTML = location.pathname === "/maps" ? shell(mapsPage(), "maps") : location.pathname === "/cockpit" ? cockpit(robot) : location.pathname === "/settings" ? settingsPage() : home(robot);
+  app.innerHTML = location.pathname === "/maps" ? shell(mapsPage(drivePanelMarkup(), driveSettingsMarkup()), "maps") : location.pathname === "/cockpit" ? cockpit(robot) : location.pathname === "/settings" ? settingsPage() : home(robot);
   document.querySelectorAll("[data-route]").forEach((link) => link.addEventListener("click", (event) => {
     event.preventDefault();
     history.pushState({}, "", link.href);
@@ -366,6 +358,7 @@ function route() {
   }));
   if (location.pathname === "/cockpit") {
     startSensors(run);
+    startLidarWake();
     startControls();
     startDriveSettings();
     startSpeech();
@@ -374,7 +367,7 @@ function route() {
   const mappingStop=document.querySelector('#mapping-banner-stop');
   if(mappingStop)mappingStop.onclick=()=>fetch('/api/maps/active/pause',{method:'POST',signal:AbortSignal.timeout(5000)}).then(refreshMappingBanner);
   refreshMappingBanner();
-  if (location.pathname === "/maps") disposeMaps = mountMaps();
+  if (location.pathname === "/maps") { startControls(); startDriveSettings(); disposeMaps = mountMaps({stopDrive:(force=false)=>stopDrive(false,force)}); }
   if (location.pathname === "/settings") { startVoiceSettings(); startAgentSettings(); startMappingSettings(); }
 }
 
@@ -459,8 +452,10 @@ function stopDrive(preserveBoost = false, force = false) {
   const status = document.querySelector("#drive-status");
   if (status) status.textContent = "Stopped";
   if (shouldNotify || force) {
-    fetch("/api/bots/alfred/drive/stop", { method: "POST", keepalive: true }).catch(() => {});
+    pendingDriveStop = fetch("/api/bots/alfred/drive/stop", { method: "POST", keepalive: true }).then(response=>{if(!response.ok)throw Error("Could not stop previous movement");});
+    pendingDriveStop.catch(()=>{});
   }
+  return pendingDriveStop;
 }
 
 function startDriveSettings() {
@@ -520,6 +515,7 @@ function startControls() {
     const direction = button.dataset.drive;
     button.addEventListener("pointerdown", (event) => {
       event.preventDefault();
+      if (!manualControlsAvailable()) return;
       if (direction === "stop") return stopDrive(false, true);
       button.setPointerCapture(event.pointerId);
       drivePointers.set(event.pointerId, direction);
@@ -535,9 +531,12 @@ function startControls() {
   });
 }
 
+function manualControlsAvailable() {
+  return location.pathname === "/cockpit" || (location.pathname === "/maps" && document.querySelector("#map-manual-controls")?.hidden === false);
+}
 const keyDirections = { ArrowUp: "forward", ArrowDown: "reverse", ArrowLeft: "left", ArrowRight: "right" };
 window.addEventListener("keydown", (event) => {
-  if (location.pathname !== "/cockpit" || document.querySelector("dialog[open]") || event.target.closest("input, textarea, select, [contenteditable]")) return;
+  if (!manualControlsAvailable() || document.querySelector("dialog[open]") || event.target.closest("input, textarea, select, [contenteditable]")) return;
   const direction = event.key === "Shift" ? "boost" : keyDirections[event.key];
   if (!direction) return;
   event.preventDefault();
@@ -712,4 +711,17 @@ async function startMappingSettings(){
  const call=async(body)=>{const r=await fetch('/api/maps/settings',{method:body?'PUT':'GET',headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(8000)});const d=await r.json();if(!d.ok)throw Error(d.error);return d.result;};
  try{const value=await call();cruise.value=value.cruise_mm_s;approach.value=value.approach_mm_s;}catch(e){status.textContent=e.message;}
  form.onsubmit=async(e)=>{e.preventDefault();const button=document.querySelector('#save-mapping');button.disabled=true;try{await call({cruise_mm_s:Number(cruise.value),approach_mm_s:Number(approach.value)});status.textContent='Mapping speeds saved.';}catch(error){status.textContent=error.message;}finally{button.disabled=false;}};
+}
+
+function startLidarWake() {
+ const button=document.querySelector('#lidar-wake'),message=document.querySelector('#lidar-wake-message');
+ button.onclick=async()=>{
+  button.disabled=true;button.textContent='Waking…';message.hidden=false;message.textContent='Waking Alfred and LiDAR…';
+  try {
+   const response=await fetch('/api/bots/alfred/lidar/wake',{method:'POST',signal:AbortSignal.timeout(20000)});
+   const value=await response.json();if(!response.ok || !value.ok)throw Error(value.error||value.result||'Wake failed');
+   message.textContent='LiDAR awake. Ready for manual control.';
+  } catch(error) { message.textContent='Could not wake LiDAR: '+error.message; }
+  finally {button.disabled=false;button.textContent='Wake LiDAR';}
+ };
 }

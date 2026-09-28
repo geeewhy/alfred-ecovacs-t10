@@ -31,7 +31,7 @@ The default Mac backend is verified end-to-end. `native` invokes the installed `
 
 ## Rust engine
 
-The on-robot engine is a loopback-only HTTP runtime. The HTTP interface, audio service, native firmware adapter, and temporary clip store are separate components behind narrow interfaces. The host client creates a temporary authenticated ADB forward; no unauthenticated LAN port is exposed.
+The on-robot engine listens directly on IPv4 LAN port 8765. Every endpoint requires the bearer credential stored in `/data/alfred/engine-token` (mode0600); the matching host file is `artifacts/engine-token`, ignored by Git. Missing or invalid credentials prevent startup. HQ, mapping, and the Python engine client use direct HTTP rather than an ADB forward. The HTTP interface, audio service, native firmware adapter, and temporary clip store remain separate components.
 
 `GET /v1/telemetry/battery` returns the engine's latest ROS `/power/Battery` and `/power/ChargeState` observations. The telemetry component reconnects independently of HTTP and audio, and atomically persists its last state to `/data/alfred/state/battery.json`.
 
@@ -52,3 +52,39 @@ Diagnostics: each log retains the newest complete records within 10 KiB. HQ: `ar
 Native startup greeting: `python3 setup/startup_sound.py --preview` installs Daniel saying “Hello, my good sir.” A persistent clip is bind-mounted over `/media/music/ZH/0.ogg` by Alfred's autostart hook, before the stock boot player runs; no HQ/network dependency or rootfs flash. Original saved at `/data/alfred/backups/startup-original.ogg`; `python3 setup/startup_sound.py --restore` disables the overlay. Stock OTA/watchdog-boot suppression still applies. Installed path/checksums and playback verified; next normal power-on verifies the full boot sequence.
 
 HQ Maps: live LiDAR capture, saved floor plans, polygon areas, split/merge and PNG/SVG export. See [maps.md](maps.md) for workflow and scan-matching limits.
+
+Connection failure investigation (2026-09-27): repeated `adb connect` against
+an already-connected device leaked one robot-side socket per invocation
+(25 requests: FD count66→91); ordinary shell requests did not show that growth.
+Persistent adbd logs show repeated exits255 after `Too many open files`. HQ
+runtime control no longer uses ADB. The retained installation/debug client
+checks host transport state before connecting; runtime/alfred.py reuses an
+existing Wi-Fi transport.
+
+The deployed `setup/adb_supervisor.py` restarts a missing authenticated adbd
+within 5 seconds, records FD counts/uptime and honors the explicit stop flag.
+It does not restart a healthy daemon or reboot the robot. Live verification
+stopped adbd: direct engine status remained available and the supervisor
+restarted adbd with the same robot boot and engine process. No movement was
+commanded. The prior unexplained loss of whole-device reachability is not
+proven resolved by this transport change.
+
+Direct access deployment: `python3 setup/deploy_engine.py` installs the token,
+fixed native helper scripts, supervisor, and engine binary. HQ defaults to
+`http://<robot.json wifi_address>:8765` (`HQ_ENGINE_URL` overrides it); mapping
+uses `ALFRED_ENGINE_URL` in Compose and a read-only token mount. Redeploy with
+the same host credential; do not print or commit it. The engine exposes fixed
+status, fresh dock contact, LiDAR wake, and native-return-stop endpoints so
+mapping never needs shell access. HQ speech playback also uses the direct API.
+The separate microphone capture/debug tooling still uses its existing ADB
+path; it is not part of engine control.
+
+Verification: `artifacts/hq/direct-engine-verification.json` records successful
+health, system status, charging contact, native frame and Stop requests with
+ADB disconnected and its old forward removed. Missing/wrong tokens receive 401.
+
+Onboard custom return is available independently of HQ and the mapping companion.
+See [onboard return](onboard-return.md) for API, ownership, map installation,
+validation and current limits. The HQ-guided implementation remains a separate
+backup. The initial onboard deployment passed an offline localization replay on
+the robot (373 ms, 98.8% scan score); physical onboard docking is not yet verified.

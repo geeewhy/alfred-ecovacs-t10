@@ -261,20 +261,37 @@ impl DriveService {
         loop {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let mut active = self.active.lock().await;
-            if active
-                .deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                match self.publisher.publish(wheel_message(0.0, 0.0)) {
-                    Ok(()) => {
+            if let Some(state) = leased_command(active.state, active.deadline, Instant::now()) {
+                // Keep the firmware's wheel stream local and steady. Publishing
+                // does NOT renew the lease: only a fresh external command does.
+                match self
+                    .publisher
+                    .publish(wheel_message(state.left_mm_s, state.right_mm_s))
+                {
+                    Ok(()) if !state.active => {
                         active.state = DriveState::default();
                         active.deadline = None;
                     }
-                    Err(error) => eprintln!("drive watchdog stop failed: {error}"),
+                    Ok(()) => {}
+                    Err(error) => eprintln!("drive watchdog publish failed: {error}"),
                 }
             }
         }
     }
+}
+
+fn leased_command(
+    state: DriveState,
+    deadline: Option<Instant>,
+    now: Instant,
+) -> Option<DriveState> {
+    deadline.map(|end| {
+        if now < end {
+            state
+        } else {
+            DriveState::default()
+        }
+    })
 }
 
 fn valid_axis(value: f32) -> bool {
@@ -315,6 +332,32 @@ fn wheel_message(left_mm_s: f32, right_mm_s: f32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_refresh_never_extends_external_lease() {
+        let start = Instant::now();
+        let deadline = Some(start + DEADMAN);
+        let moving = DriveState {
+            left_mm_s: 40.0,
+            right_mm_s: 40.0,
+            active: true,
+            ..DriveState::default()
+        };
+        for ms in [50, 100, 150, 200, 250, 300] {
+            assert_eq!(
+                leased_command(moving, deadline, start + Duration::from_millis(ms))
+                    .unwrap()
+                    .left_mm_s,
+                40.0
+            );
+        }
+        for ms in [350, 400, 1000] {
+            let state =
+                leased_command(moving, deadline, start + Duration::from_millis(ms)).unwrap();
+            assert!(!state.active);
+            assert_eq!((state.left_mm_s, state.right_mm_s), (0.0, 0.0));
+        }
+        assert!(leased_command(moving, None, start).is_none());
+    }
     #[test]
     fn limits_validate_and_bound_mixed_commands() {
         assert!(

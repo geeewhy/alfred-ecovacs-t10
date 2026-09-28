@@ -16,3 +16,13 @@ def refine_seed(reference,points,prior):
     score=float(np.mean(distances(fit.x)<.1))
     if score<.8 or fit.fun>=cost(center)*.8:return prior
     return {'x':float(fit.x[0]),'y':float(fit.x[1]),'theta':float(fit.x[2]),'seed_score':score}
+
+
+def advance_pose(pose, previous_odom, current_odom):
+    """Carry a map pose forward by relative wheel motion, preserving its metadata."""
+    rotation=pose['theta']-previous_odom[2]
+    c,s=math.cos(rotation),math.sin(rotation)
+    dx,dy=current_odom[0]-previous_odom[0],current_odom[1]-previous_odom[1]
+    theta=pose['theta']+current_odom[2]-previous_odom[2]
+    return dict(pose,x=pose['x']+c*dx-s*dy,y=pose['y']+s*dx+c*dy,
+                theta=math.atan2(math.sin(theta),math.cos(theta)))

@@ -46,3 +46,37 @@ def observation_goal(grid, resolution, origin, pose, visited):
             target=visible[int(np.argmin(distances[visible]))]
             best=(score,{'x':px,'y':py,'theta':math.atan2(ty[target]-gy,tx[target]-gx)})
     return best[1] if best else None
+
+def frontier_regions(grid,resolution,origin,pose,visited=None):
+    components,_=label(grid==0)
+    boundaries=(grid<0)&binary_dilation(grid==0)
+    regions,_=label(boundaries,structure=np.ones((3,3)))
+    sizes=np.bincount(regions.ravel());eligible=set(np.flatnonzero(sizes>=math.ceil(.35/resolution)));eligible.discard(0)
+    reachable=set();h,w=grid.shape
+    if pose:
+        x=int((pose['x']-origin[0])/resolution);y=int((pose['y']-origin[1])/resolution)
+        if 0<=x<w and 0<=y<h and components[y,x]>0:
+            reachable=set(np.unique(regions[binary_dilation(components==components[y,x])&boundaries]))&eligible
+    # Distant disconnected free-space islands can be returns through windows.
+    # They are not unfinished rooms until a traversable connection or an actual
+    # robot visit establishes that they belong to the explored floor.
+    outside=set()
+    if visited is not None:
+        visited_components=set()
+        for p in [*(visited or []),*([pose] if pose else [])]:
+            vx=int((p['x']-origin[0])/resolution);vy=int((p['y']-origin[1])/resolution)
+            if 0<=vx<w and 0<=vy<h and components[vy,vx]>0:visited_components.add(components[vy,vx])
+        if visited_components:
+            adjacent=binary_dilation(np.isin(components,list(visited_components)))&boundaries
+            home_regions=set(np.unique(regions[adjacent]))&eligible
+            outside=eligible-home_regions
+            eligible=home_regions
+            reachable&=eligible
+    markers=[]
+    for region in sorted(eligible-reachable):
+        ys,xs=np.nonzero(regions==region)
+        # Use an actual boundary cell nearest the center, not a centroid which
+        # can lie inside an obstacle when the boundary is curved.
+        index=int(np.argmin((xs-xs.mean())**2+(ys-ys.mean())**2))
+        markers.append({'x':float(origin[0]+(xs[index]+.5)*resolution),'y':float(origin[1]+(ys[index]+.5)*resolution),'length_m':float(len(xs)*resolution)})
+    return {'reachable':len(reachable),'disconnected':len(markers),'total':len(eligible),'markers':markers,'outside_observed':len(outside)}

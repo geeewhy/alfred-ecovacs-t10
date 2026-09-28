@@ -25,3 +25,9 @@ test('occupied edges without structural evidence are obstacles, not walls',()=>{
  assert.ok(floor.boundary.some(e=>e.kind==='obstacle'));
  assert.ok(!floor.boundary.some(e=>e.kind==='wall'));
 });
+
+test('floor hides unvisited disconnected returns but keeps a previously visited room',()=>{
+ const cells=[...rectangle(0,0,20,20),...rectangle(50,0,20,20)];
+ assert.equal(floorGeometry(cells,0,[],[{x:.5,y:.5}]).geometry.length,1);
+ assert.equal(floorGeometry(cells,0,[],[{x:.5,y:.5},{x:3.,y:.5}]).geometry.length,2);
+});

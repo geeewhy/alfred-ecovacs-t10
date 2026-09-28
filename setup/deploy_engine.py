@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Atomically deploy the cross-compiled Alfred engine and writable boot hook."""
-import hashlib,http.server,pathlib,shlex,socket,sys,threading
+import hashlib,http.server,pathlib,shlex,socket,sys,threading,os,secrets
 
 ROOT=pathlib.Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'runtime'))
 from alfred import Robot,CONFIG
@@ -24,8 +24,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def main():
     if not BINARY.is_file():raise RuntimeError('Build the engine before deployment')
+    token=ROOT/'artifacts/engine-token'
+    if not token.exists():
+        token.parent.mkdir(parents=True,exist_ok=True)
+        fd=os.open(token,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(fd,'w') as output:output.write(secrets.token_hex(32)+'\n')
     robot=Robot();robot.shell('mkdir -p /data/alfred')
+    robot.upload(token,'/data/alfred/engine-token')
+    robot.shell('chmod 600 /data/alfred/engine-token')
+    for script in ('lidar_start.py','map_bridge.py'):
+        robot.upload(ROOT/'runtime'/script,'/data/alfred/'+script)
     robot.upload(ROOT/'setup/rolling_log.py','/data/alfred/rolling_log.py')
+    robot.upload(ROOT/'setup/adb_supervisor.py','/data/alfred/adb_supervisor.py')
     robot.upload(ROOT/'setup/adb-start.sh','/data/alfred/adb-start.sh')
     robot.upload(ROOT/'setup/start_engine.py','/data/alfred/start_engine.py')
     expected=hashlib.md5(BINARY.read_bytes()).hexdigest()

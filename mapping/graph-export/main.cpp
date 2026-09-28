@@ -6,8 +6,17 @@
 #include <iomanip>
 #include <iostream>
 
+// Offline trimming changes only the serialized graph; no optimizer or robot.
+class ArchiveSolver final : public karto::ScanSolver {
+  IdPoseVector poses;
+ public:
+  void Compute() override {}
+  void Configure(rclcpp_lifecycle::LifecycleNode::SharedPtr) override {}
+  const IdPoseVector &GetCorrections() const override {return poses;}
+};
+
 int main(int argc,char **argv) {
-  if(argc!=3){std::cerr<<"usage: graph_export GRAPH_PREFIX OUTPUT_JSON\n";return 2;}
+  if(argc!=3 && argc!=5){std::cerr<<"usage: graph_export GRAPH_PREFIX OUTPUT_JSON [KEEP_MAX_ID NEW_GRAPH_PREFIX]\n";return 2;}
   try {
     karto::Mapper mapper;
     karto::Dataset dataset;
@@ -16,18 +25,42 @@ int main(int argc,char **argv) {
     for(auto *object:dataset.GetLasers()) {
       if(auto *sensor=dynamic_cast<karto::Sensor *>(object))karto::SensorManager::GetInstance()->RegisterSensor(sensor,true);
     }
+    ArchiveSolver archiveSolver;
+    if(argc==5) {
+      if(std::string(argv[1])==argv[4])throw std::runtime_error("Recovery output must be a new graph");
+      const auto maxId=std::stoul(argv[3]);
+      mapper.SetScanSolver(&archiveSolver);
+      const auto vertices=mapper.GetGraph()->GetVertices();
+      for(const auto &sensor:vertices)for(auto it=sensor.second.rbegin();it!=sensor.second.rend();++it) {
+        auto *vertex=it->second;auto *scan=vertex->GetObject();
+        if(scan->GetUniqueId()>maxId) {
+          if(!mapper.RemoveNodeFromGraph(vertex))throw std::runtime_error("Cannot remove graph vertex");
+          mapper.GetMapperSensorManager()->RemoveScan(scan);
+        }
+      }
+      auto *manager=mapper.GetMapperSensorManager();
+      for(const auto &name:manager->GetSensorNames()) {
+        manager->ClearRunningScans(name);manager->ClearLastScan(name);
+      }
+      const auto kept=mapper.GetAllProcessedScans();
+      if(kept.empty())throw std::runtime_error("Recovery would empty graph");
+      for(auto *scan:kept)manager->SetLastScan(scan);
+      mapper.SaveToFile(std::string(argv[4])+".posegraph");
+      dataset.SaveToFile(std::string(argv[4])+".data");
+    }
     std::ofstream out(argv[2]);
     if(!out)throw std::runtime_error("Cannot open graph export");
-    out<<std::setprecision(9)<<"{\"keyframes\":[";
+    out<<std::setprecision(17)<<"{\"keyframes\":[";
     bool first=true;
     const auto scans=mapper.GetAllProcessedScans();
     const size_t stride=std::max<size_t>(1,(scans.size()+1499)/1500);
     for(size_t i=0;i<scans.size();i+=stride) {
-      auto *scan=scans[i];const auto pose=scan->GetCorrectedPose();
+      auto *scan=scans[i];const auto pose=scan->GetCorrectedPose();const auto odom=scan->GetOdometricPose();
       // Force cached range points to use the serialized corrected pose.
       scan->SetCorrectedPose(pose);
       if(!first)out<<",";first=false;
       out<<"{\"id\":"<<scan->GetUniqueId()<<",\"stamp\":"<<scan->GetTime()
+         <<",\"odom\":{\"x\":"<<odom.GetX()<<",\"y\":"<<odom.GetY()<<",\"theta\":"<<odom.GetHeading()<<"}"
          <<",\"pose\":{\"x\":"<<pose.GetX()<<",\"y\":"<<pose.GetY()<<",\"theta\":"<<pose.GetHeading()<<"},\"points\":[";
       bool firstPoint=true;
       for(const auto &point:scan->GetPointReadings(true)) {

@@ -60,11 +60,11 @@ export function wallSegments(cells, axis = null) {
 
 // A line fit is only a candidate. Require repeat observation from separated
 // robot positions before exposing it as a structural wall or routing constraint.
+// Select independent viewpoints per wall bin, not globally: a nearby later scan
+// can reveal a surface that an earlier scan at the same location could not see.
 export function supportedWalls(cells, keyframes = [], axis = null) {
-  if(keyframes.length<3)return [];
-  const evidence=[];
-  for(const f of keyframes)if(f.pose && Array.isArray(f.points) && evidence.every(q=>Math.hypot(q.pose.x-f.pose.x,q.pose.y-f.pose.y)>=.4))evidence.push(f);
-  if(evidence.length<3)return [];
+  const evidence=keyframes.filter(f=>f.pose && Array.isArray(f.points));
+  if(evidence.length<2)return [];
   const grid=new Map(cells.map(([x,y,v])=>[`${x},${y}`,v]));
   return wallSegments(cells,axis).filter(([a,b])=>{
     const length=Math.hypot(b[0]-a[0],b[1]-a[1]);
@@ -75,11 +75,15 @@ export function supportedWalls(cells, keyframes = [], axis = null) {
     if(free/bins>.2)return false;
     // Combine partial views along the wall; a doorway or occlusion need not
     // leave any one viewpoint with visibility of the entire segment.
-    const votes=new Uint16Array(bins);
+    const votes=new Uint8Array(bins);
+    const firstView=new Array(bins);
     for(const frame of evidence){
       const hits=new Set();
       for(const p of frame.points){const x=p[0]-a[0],y=p[1]-a[1],t=x*dx+y*dy;if(t>=0&&t<=length&&Math.abs(x*dy-y*dx)<.075)hits.add(Math.min(bins-1,Math.floor(t/length*bins)));}
-      for(const bin of hits)votes[bin]++;
+      for(const bin of hits) {
+        if(!firstView[bin]) { firstView[bin]=frame.pose; votes[bin]=1; }
+        else if(Math.hypot(firstView[bin].x-frame.pose.x,firstView[bin].y-frame.pose.y)>=.10) votes[bin]=2;
+      }
     }
     return [...votes].filter(n=>n>=2).length/bins>=.7;
   });
@@ -123,7 +127,7 @@ export function structuralPlan(cells, previous = {}, sequence = null, keyframes 
     const v=accepted.reduce((v,{points:[a,b]})=>{const w=Math.hypot(b[0]-a[0],b[1]-a[1]),t=4*Math.atan2(b[1]-a[1],b[0]-a[0]);return [v[0]+w*Math.cos(t),v[1]+w*Math.sin(t),v[2]+w];},[0,0,0]);
     if(v[2]>3 && Math.hypot(v[0],v[1])/v[2]>.85)axis=Math.atan2(v[1],v[0])/4;
   }
-  return {version:3,sequence,axis,walls,floor:floorGeometry(cells,axis,walls.filter(w=>w.observations>=2).map(w=>w.points))};
+  return {version:3,sequence,axis,walls,floor:floorGeometry(cells,axis,walls.filter(w=>w.observations>=2).map(w=>w.points),keyframes?.map(f=>f.pose))};
 }
 
 // Consolidate the current measured edges before assigning persistent identities.

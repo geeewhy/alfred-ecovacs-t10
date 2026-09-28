@@ -9,7 +9,7 @@ export class HqServer {
   constructor(config, statusService, engineClient) {
     this.config = config;
     this.maps = new MapService(engineClient);
-    this.speech = new SpeechService();
+    this.speech = new SpeechService(engineClient);
     this.chat = new ChatService(this.speech);
     this.voice = new VoiceService(this.chat, this.speech);
     this.statusService = statusService;
@@ -20,6 +20,10 @@ export class HqServer {
   async handle(request, response) {
     const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
 
+    if(url.pathname==="/api/bots/alfred/station" && request.method==="GET"){
+      try{return json(response,200,{ok:true,result:await this.engineClient.dockStatus()});}
+      catch(error){return json(response,503,{ok:false,error:error.message});}
+    }
     if (url.pathname === "/api/maps" || url.pathname.startsWith("/api/maps/")) {
       try {
         if(url.pathname === "/api/maps/active" && request.method === "GET") return json(response,200,{ok:true,result:this.maps.summary()});
@@ -28,13 +32,18 @@ export class HqServer {
           if(request.method==="GET")return json(response,200,{ok:true,result:(await this.maps.navigation.call("status")).settings});
           if(request.method==="PUT"){if(this.maps.active?.status.state==="scanning")await this.maps.pauseActive();else await this.maps.navigation.call("pause");return json(response,200,{ok:true,result:await this.maps.navigation.call("settings",await readJson(request))});}
         }
+        if(url.pathname === "/api/maps/engine-return" && request.method === "GET") return json(response,200,{ok:true,result:await this.engineClient.onboardReturn()});
         const [, , , id, action] = url.pathname.split("/");
         let result;
         if (!id && request.method === "GET") result = await this.maps.list();
         else if (!id && request.method === "POST") result = await this.maps.create(await readJson(request));
         else if (id && !action && request.method === "DELETE") result = await this.maps.remove(id);
         else if (id && !action && request.method === "GET") result = await this.maps.get(id);
+        else if (id && action === "structure-refresh" && request.method === "POST") result = await this.maps.refreshStructure(id);
+        else if (id && action === "position" && request.method === "GET") result = await this.maps.position(id);
         else if (id && action === "edit" && request.method === "POST") result = await this.maps.edit(id, await readJson(request));
+        else if (id && action === "return-onboard" && request.method === "POST") result = await this.maps.returnOnboard(id);
+        else if (id && action === "return" && request.method === "POST") result = await this.maps.returnToStation(id);
         else if (id && action === "scan" && request.method === "POST") {
           const body=await readJson(request), controller=new AbortController();
           const timer=setTimeout(()=>controller.abort(),12000);
@@ -130,11 +139,29 @@ export class HqServer {
 
     if (request.method === "PUT" && url.pathname === "/api/bots/alfred/drive") {
       try {
-        if(this.maps.exploring) await this.maps.pauseActive();
+        if(this.driveStopTask) throw Error("Stopping previous controller; retry while held");
+        if(this.maps.ownsMotion) {
+          // Cancel autonomous motion without retaining this drive vector across
+          // slow cleanup. A fresh held-control update may take over afterward.
+          const task=(async()=>{await this.engineClient.stop();await this.maps.pauseActive();})();
+          this.driveStopTask=task;
+          task.catch(()=>{}).finally(()=>{if(this.driveStopTask===task)this.driveStopTask=null;});
+          throw Error("Stopping previous controller; retry while held");
+        }
         const vector = await readJson(request);
+        this.maps.prepareManualDrive(vector);
         return json(response, 200, await this.engineClient.drive(vector));
       } catch (error) {
         return json(response, 503, { ok: false, error: error.message });
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/bots/alfred/lidar/wake") {
+      try {
+        await this.engineClient.wakeForMapping();
+        return json(response, 200, {ok:true,result:"Alfred and LiDAR are awake"});
+      } catch (error) {
+        return json(response, 503, {ok:false,error:error.message});
       }
     }
 
@@ -149,8 +176,16 @@ export class HqServer {
 
     if (request.method === "POST" && url.pathname === "/api/bots/alfred/drive/stop") {
       try {
-        await this.maps.stopExploration();
-        return json(response, 200, await this.engineClient.stop());
+        // Stop immediately. Controller cleanup may send further stops, so
+        // reject new drive commands until that cleanup is finished.
+        const task = (async () => {
+          const result = await this.engineClient.stop();
+          await this.maps.stopExploration();
+          return result;
+        })();
+        this.driveStopTask = task;
+        try { return json(response, 200, await task); }
+        finally { if(this.driveStopTask === task) this.driveStopTask = null; }
       } catch (error) {
         return json(response, 503, { ok: false, error: error.message });
       }

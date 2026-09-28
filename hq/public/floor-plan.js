@@ -36,5 +36,15 @@ export function floorSurface(map) {
  if(!floor?.geometry?.length)return '';
  const outline=floor.geometry.flatMap(p=>p.map(r=>'M'+r.map(([x,y])=>`${x},${-y}`).join('L')+'Z')).join('');
  const edges=kind=>floor.boundary.filter(e=>e.kind===kind).map(({points:[a,b]})=>`M${a[0]},${-a[1]}L${b[0]},${-b[1]}`).join('');
- return `<path d="${outline}" fill="#f0f2f3" fill-rule="evenodd"/><path d="${edges('wall')}" fill="none" stroke="#30373c" stroke-width=".085" stroke-linejoin="miter"/><path d="${edges('obstacle')}" fill="none" stroke="#687f8c" stroke-width=".055" stroke-linejoin="round"/><path d="${edges('unobserved')}" fill="none" stroke="#77828c" stroke-width=".025" stroke-dasharray=".09 .07"/>`;
+ return `<path d="${outline}" fill="#f0f2f3" fill-rule="evenodd"/><path d="${edges('wall')}" fill="none" stroke="#465760" stroke-width=".035" stroke-linejoin="miter"/><path d="${edges('obstacle')}" fill="none" stroke="#687f8c" stroke-width=".035" stroke-linejoin="round"/><path d="${edges('unobserved')}" fill="none" stroke="#77828c" stroke-width=".025" stroke-dasharray=".09 .07"/>`;
+}
+
+export function boundaryMarkers(map) {
+ return (map?.scan?.boundaryMarkers||[]).filter(p=>Number.isFinite(p.x)&&Number.isFinite(p.y)).map((p,i)=>`<g class="map-boundary-marker" role="img" aria-label="Unmapped boundary ${i+1}" transform="translate(${p.x},${-p.y})"><title>Unmapped boundary ${i+1}: needs another approach</title><circle r=".13" fill="#c63535" stroke="#fff" stroke-width=".035"/><text transform="rotate(${-(map.displayAngle||0)})" text-anchor="middle" dy=".042" font-size=".12" font-family="Arial,sans-serif" font-weight="700" fill="#fff" pointer-events="none">${i+1}</text></g>`).join('');
+}
+
+export function stationMarker(map) {
+ const s=map?.station;
+ if(!s || !Number.isFinite(s.x) || !Number.isFinite(s.y))return '';
+ return `<g class="map-station-marker" role="img" aria-label="Charging station" transform="translate(${s.x},${-s.y}) rotate(${-(map.displayAngle||0)})"><title>Station: verified docked position</title><rect x="-.16" y="-.16" width=".32" height=".32" rx=".05" fill="#356c62" stroke="#f4f7f6" stroke-width=".025"/><path d="M.025 -.12L-.07 .015H0L-.025 .12L.08 -.015H.01Z" fill="#f4f7f6"/><text y=".34" text-anchor="middle" font-size=".15" fill="#28493f" stroke="#f4f7f6" stroke-width=".035" paint-order="stroke">Station</text></g>`;
 }

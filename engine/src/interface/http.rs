@@ -5,7 +5,11 @@ use crate::components::drive::{
     DriveService, DriveSettings, DriveState, DriveVector, MappingTwist,
 };
 use crate::components::lidar::{LidarScan, LidarTelemetry};
+use crate::components::map_evidence::{EvidenceMap, Reference};
 use crate::components::mapping::{NativeMapping, NativeSnapshot};
+use crate::components::reflectance::{FilterRequest, Model, ReflectanceService};
+use crate::components::return_geometry::ReturnMap;
+use crate::components::return_to_station::ReturnService;
 use crate::components::telemetry::{BatteryStatus, BatteryTelemetry};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, State};
@@ -23,6 +27,9 @@ const MAX_CLIP_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct HttpState {
+    reference: Arc<tokio::sync::RwLock<Option<Arc<EvidenceMap>>>>,
+    reflectance: Arc<ReflectanceService>,
+    returning: Arc<ReturnService>,
     audio: Arc<AudioService>,
     battery: Arc<BatteryTelemetry>,
     lidar: Arc<LidarTelemetry>,
@@ -40,6 +47,7 @@ struct ApiResponse {
 
 pub struct HttpRuntime {
     address: String,
+    token: String,
     audio: Arc<AudioService>,
     battery: Arc<BatteryTelemetry>,
     lidar: Arc<LidarTelemetry>,
@@ -52,6 +60,7 @@ pub struct HttpRuntime {
 impl HttpRuntime {
     pub fn new(
         address: impl Into<String>,
+        token: String,
         audio: Arc<AudioService>,
         battery: Arc<BatteryTelemetry>,
         lidar: Arc<LidarTelemetry>,
@@ -62,6 +71,7 @@ impl HttpRuntime {
     ) -> Self {
         Self {
             address: address.into(),
+            token,
             audio,
             battery,
             lidar,
@@ -73,7 +83,19 @@ impl HttpRuntime {
     }
 
     pub async fn run(self) -> io::Result<()> {
+        let reflectance = ReflectanceService::new("/data/alfred/state/reflectance");
+        let returning = ReturnService::new(
+            self.drive.clone(),
+            self.lidar.clone(),
+            self.mapping.clone(),
+            self.bumpers.clone(),
+            reflectance.clone(),
+        )
+        .await;
         let state = HttpState {
+            reference: Arc::new(tokio::sync::RwLock::new(None)),
+            reflectance,
+            returning,
             audio: self.audio,
             battery: self.battery,
             lidar: self.lidar,
@@ -84,6 +106,18 @@ impl HttpRuntime {
         };
         let app = Router::new()
             .route("/health", get(health))
+            .route("/v1/mapping/reference", put(reference_install))
+            .route("/v1/mapping/evidence", post(reference_check))
+            .route("/v1/mapping/reflectance/filter", post(reflection_filter))
+            .route("/v1/mapping/reflectance/model", put(reflection_install))
+            .route("/v1/mapping/reflectance/model/{id}", get(reflection_model))
+            .route("/v1/return", get(return_status).post(start_return))
+            .route("/v1/return/stop", post(stop_return))
+            .route("/v1/return/config", put(return_config))
+            .route("/v1/system/status", get(system_status))
+            .route("/v1/telemetry/dock", get(dock_status))
+            .route("/v1/drive/lidar-wake", post(lidar_wake))
+            .route("/v1/drive/native-return/stop", post(native_return_stop))
             .route("/v1/mapping/native/grid", get(native_grid))
             .route("/v1/mapping/native/snapshot", get(native_snapshot))
             .route("/v1/mapping/native/load", post(native_load))
@@ -107,7 +141,11 @@ impl HttpRuntime {
             .route("/v1/audio/stock/{number}", post(stock))
             .route("/v1/audio/volume/{percent}", put(volume))
             .layer(DefaultBodyLimit::max(MAX_CLIP_BYTES))
-            .with_state(state);
+            .with_state(state)
+            .layer(axum::middleware::from_fn_with_state(
+                self.token,
+                super::auth::authorize,
+            ));
         let listener = tokio::net::TcpListener::bind(&self.address).await?;
         eprintln!("alfred-engine listening on {}", self.address);
         axum::serve(listener, app).await
@@ -166,6 +204,14 @@ async fn drive(
     State(state): State<HttpState>,
     Json(vector): Json<DriveVector>,
 ) -> Result<Json<DriveResponse>, (StatusCode, Json<ApiResponse>)> {
+    let _gate = state.returning.gate.lock().await;
+    if state.returning.active().await {
+        return Err(failure(
+            StatusCode::CONFLICT,
+            "Engine return owns motion; stop it before manual or HQ driving",
+        ));
+    }
+
     drive_result(state.drive.command(vector).await)
 }
 
@@ -173,6 +219,14 @@ async fn mapping_drive(
     State(state): State<HttpState>,
     Json(vector): Json<DriveVector>,
 ) -> Result<Json<DriveResponse>, (StatusCode, Json<ApiResponse>)> {
+    let _gate = state.returning.gate.lock().await;
+    if state.returning.active().await {
+        return Err(failure(
+            StatusCode::CONFLICT,
+            "Engine return owns motion; stop it before manual or HQ driving",
+        ));
+    }
+
     if vector.linear != 0.0 || vector.angular != 0.0 {
         let sensors = state.bumpers.current();
         let scan = state.lidar.current().await;
@@ -245,6 +299,13 @@ async fn wake_drive(
 async fn stop_drive(
     State(state): State<HttpState>,
 ) -> Result<Json<DriveResponse>, (StatusCode, Json<ApiResponse>)> {
+    let _gate = state.returning.gate.lock().await;
+    state
+        .returning
+        .stop()
+        .await
+        .map_err(|e| failure(StatusCode::SERVICE_UNAVAILABLE, e))?;
+
     drive_result(state.drive.stop().await)
 }
 
@@ -423,6 +484,14 @@ async fn native_load(
     State(state): State<HttpState>,
     Json(snapshot): Json<NativeSnapshot>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiResponse>)> {
+    let _gate = state.returning.gate.lock().await;
+    if state.returning.active().await {
+        return Err(failure(
+            StatusCode::CONFLICT,
+            "Stop onboard return before changing native mapping",
+        ));
+    }
+
     state
         .drive
         .stop()
@@ -452,6 +521,14 @@ async fn native_control(
     State(state): State<HttpState>,
     Path(action): Path<String>,
 ) -> Result<Json<ApiResponse>, (StatusCode, Json<ApiResponse>)> {
+    let _gate = state.returning.gate.lock().await;
+    if state.returning.active().await {
+        return Err(failure(
+            StatusCode::CONFLICT,
+            "Stop onboard return before changing native mapping",
+        ));
+    }
+
     state.drive.stop().await.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -488,6 +565,14 @@ async fn mapping_twist(
     State(state): State<HttpState>,
     Json(value): Json<MappingTwist>,
 ) -> Result<Json<DriveResponse>, (StatusCode, Json<ApiResponse>)> {
+    let _gate = state.returning.gate.lock().await;
+    if state.returning.active().await {
+        return Err(failure(
+            StatusCode::CONFLICT,
+            "Engine return owns motion; stop it before manual or HQ driving",
+        ));
+    }
+
     let vector = DriveVector {
         linear: value.linear_mm_s / 120.0,
         angular: value.angular_rad_s,
@@ -507,4 +592,211 @@ async fn native_frame(State(state): State<HttpState>) -> Json<serde_json::Value>
     Json(
         serde_json::json!({"ok":true,"result":{"native":state.mapping.status().await,"lidar":state.lidar.current().await,"bumpers":state.bumpers.current()}}),
     )
+}
+
+async fn fixed_command(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        tokio::process::Command::new(program)
+            .args(args)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "Native request timed out".to_string())?
+    .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("Native request failed".into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+async fn system_status(State(state): State<HttpState>) -> impl IntoResponse {
+    match fixed_command(
+        "/bin/sh",
+        &["-c", include_str!("../../../runtime/status.sh")],
+    )
+    .await
+    {
+        Ok(mut raw) => {
+            let battery = state.battery.current().await;
+            raw.push_str(&format!(
+                "BATTERY_JSON={}\n",
+                serde_json::json!({"result":battery})
+            ));
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"ok":true,"result":raw})),
+            )
+        }
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ok":false,"result":error})),
+        ),
+    }
+}
+async fn dock_status() -> impl IntoResponse {
+    use crate::components::power::{BatterySnapshotSource, NativeBatterySnapshot};
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        NativeBatterySnapshot::new().read(),
+    )
+    .await
+    {
+        Ok(Ok(value)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok":true,"result":{
+            "docked":value.on_charger,"percent":value.percent,
+            "observedAt":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+            "source":"native-charging-contact"}})),
+        ),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ok":false,"result":"Charging telemetry unavailable"})),
+        ),
+    }
+}
+async fn lidar_wake() -> impl IntoResponse {
+    result(fixed_command("python", &["/data/alfred/lidar_start.py"]).await)
+}
+async fn native_return_stop(State(state): State<HttpState>) -> impl IntoResponse {
+    if let Err(error) = state.drive.stop().await {
+        return result(Err(error));
+    }
+    result(fixed_command("python", &["/data/alfred/map_bridge.py", "stop-return"]).await)
+}
+
+async fn return_status(State(state): State<HttpState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({"ok":true,"result":state.returning.status().await}))
+}
+async fn start_return(State(state): State<HttpState>) -> impl IntoResponse {
+    let _gate = state.returning.gate.lock().await;
+    result(
+        state
+            .returning
+            .start()
+            .await
+            .map(|_| "Engine return started".into()),
+    )
+}
+async fn stop_return(State(state): State<HttpState>) -> impl IntoResponse {
+    let _gate = state.returning.gate.lock().await;
+    result(
+        state
+            .returning
+            .stop()
+            .await
+            .map(|_| "Engine return stopped".into()),
+    )
+}
+async fn return_config(
+    State(state): State<HttpState>,
+    Json(map): Json<ReturnMap>,
+) -> impl IntoResponse {
+    let _gate = state.returning.gate.lock().await;
+    result(
+        state
+            .returning
+            .configure(map)
+            .await
+            .map(|_| "Onboard return map installed".into()),
+    )
+}
+
+async fn reflection_filter(
+    State(state): State<HttpState>,
+    Json(input): Json<FilterRequest>,
+) -> impl IntoResponse {
+    let value = async {
+        input.validate()?;
+        let model = state.reflectance.load(&input.map_id).await?;
+        Ok::<_, String>(model.filter(input.pose, &input.points))
+    }
+    .await;
+    match value {
+        Ok(value) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok":true,"result":value})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok":false,"result":e})),
+        ),
+    }
+}
+async fn reflection_model(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.reflectance.load(&id).await {
+        Ok(value) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok":true,"result":value.model})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok":false,"result":e})),
+        ),
+    }
+}
+async fn reflection_install(
+    State(state): State<HttpState>,
+    Json(input): Json<Model>,
+) -> impl IntoResponse {
+    let _gate = state.returning.gate.lock().await;
+    if state.returning.active().await {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::json!({"ok":false,"result":"Finish or stop onboard return before replacing its reflection model"}),
+            ),
+        );
+    }
+    match state.reflectance.install(input).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok":true,"result":"installed"})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok":false,"result":e})),
+        ),
+    }
+}
+
+async fn reference_install(
+    State(state): State<HttpState>,
+    Json(input): Json<Reference>,
+) -> impl IntoResponse {
+    match EvidenceMap::new(input) {
+        Ok(map) => {
+            *state.reference.write().await = Some(Arc::new(map));
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"ok":true,"result":"Reference installed"})),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok":false,"error":e})),
+        ),
+    }
+}
+async fn reference_check(
+    State(state): State<HttpState>,
+    Json(input): Json<FilterRequest>,
+) -> impl IntoResponse {
+    let map = state.reference.read().await.clone();
+    let checked = map
+        .ok_or_else(|| "Mapping reference not installed".to_string())
+        .and_then(|m| m.check(&input));
+    match checked {
+        Ok(v) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok":true,"result":v})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok":false,"error":e})),
+        ),
+    }
 }

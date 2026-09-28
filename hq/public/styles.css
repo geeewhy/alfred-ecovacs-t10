@@ -276,3 +276,10 @@ body.cockpit-mode .cockpit-content {height:auto;flex:1;min-height:0}
 .map-key-wall::before { border-top:3px solid #30373c; }
 .map-key-obstacle::before { border-top:2px solid #687f8c; }
 .map-key-unknown::before { border-top:1px dashed #8c969e; }
+
+#map-manual-controls { border-bottom: 1px solid var(--border, #ddd); padding-bottom: 16px; margin-bottom: 16px; }
+#map-manual-controls[hidden] { display: none; }
+#map-manual-controls .deck-title { flex-wrap: wrap; gap: 8px; }
+#map-manual-controls .dpad { width: 172px; grid-template: repeat(3, 52px) / repeat(3, 52px); margin: 16px auto; }
+#map-manual-controls .dpad button { touch-action: none; }
+#map-position-status { color: #52647a; font-size: 12px; }

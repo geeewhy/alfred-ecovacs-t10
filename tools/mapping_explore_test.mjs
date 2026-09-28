@@ -21,7 +21,7 @@ try {
   const d=await r.json();if(!d.ok)throw Error(d.error);console.log('speeds',JSON.stringify(d.result));
  }
  if(process.argv.includes('--backend'))await fetch('http://127.0.0.1:48765/v1/mapping/native/backend-start',{method:'POST',signal:AbortSignal.timeout(1500)});
- await api('/'+m.id+'/scan',{action:mapId?'resume':'start',mode:'explore',minutes:Math.min(60,Math.ceil(seconds/60)+1)});
+ await api('/'+m.id+'/scan',{action:mapId?'resume':'start',mode:process.argv.includes('--deep')?'deep':'explore',minutes:Math.min(60,Math.ceil(seconds/60)+1)});
  startedScan=true;
  const started=Date.now();let report=started;
  while(Date.now()-started<seconds*1000) {

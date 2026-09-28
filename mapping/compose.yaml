@@ -7,14 +7,22 @@ services:
       - "127.0.0.1:48766:8766"
     environment:
       ROS_DOMAIN_ID: "42"
-      ALFRED_ENGINE: "http://host.docker.internal:48765"
+      ALFRED_ENGINE: "${ALFRED_ENGINE_URL:-http://192.168.1.89:8765}"
     volumes:
+      - ../artifacts/engine-token:/alfred/engine-token:ro
       - ./state:/alfred/state
       - ./bridge.py:/alfred/bridge.py:ro
+      - ../engine/target/aarch64-unknown-linux-musl/release/alfred-engine:/alfred/alfred-engine:ro
       - ./motion_recovery.py:/alfred/motion_recovery.py:ro
+      - ./global_seed.py:/alfred/global_seed.py:ro
       - ./localization_seed.py:/alfred/localization_seed.py:ro
+      - ./deep_pass.py:/alfred/deep_pass.py:ro
+      - ./wall_verification.py:/alfred/wall_verification.py:ro
       - ./refinement.py:/alfred/refinement.py:ro
       - ./scan_geometry.py:/alfred/scan_geometry.py:ro
+      - ./active_localization.py:/alfred/active_localization.py:ro
+      - ./docking.py:/alfred/docking.py:ro
+      - ./calibration/dock-enclosure.json:/alfred/dock-enclosure.json:ro
       - ./slam_session.py:/alfred/slam_session.py:ro
       - ./slam-upstream.yaml:/alfred/slam-upstream.yaml:ro
       - ./configure.py:/alfred/configure.py:ro

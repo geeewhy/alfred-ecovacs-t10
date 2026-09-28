@@ -1,3 +1,5 @@
+import { livePosition } from "./live-position.mjs";
+import { stationObservation, retainStation } from "./station.mjs";
 import { NativeScanner, GraphScanner, NavigationClient } from "./native-scanner.mjs";
 import { scanAge } from "./freshness.mjs";
 import { Worker } from "node:worker_threads";
@@ -11,7 +13,6 @@ import { polygon, split, merge, area, validateGeometry } from "./geometry.mjs";
 import { supportedWalls, structuralPlan } from "./walls.mjs";
 import { Scanner, outlines } from "./scanner.mjs";
 import { Explorer } from "./explorer.mjs";
-import { NativeMapClient } from "./native-client.mjs";
 const directory = fileURLToPath(
   new URL("../../../artifacts/hq/maps/", import.meta.url),
 );
@@ -29,9 +30,11 @@ export class MapService {
     this.navigation = new NavigationClient();
     this.timer = null;
     this.epoch = 0;
-    this.native = engine.adbClient
-      ? new NativeMapClient(engine.adbClient)
-      : null;
+    this.native = typeof engine.nativeMapping === "function" ? {call:async()=>{
+      const status=await engine.nativeMapping("status"),bytes=status.reports?.["/task/WorkState"]?.bytes;
+      if(!bytes || bytes.length<3)throw Error("Native task status unavailable");
+      return {...status,work:{type:bytes[0],subtype:bytes[1],state:bytes[2]}};
+    }} : null;
   }
   serial(fn) {
     const next = this.queue.then(fn);
@@ -74,6 +77,7 @@ export class MapService {
   async get(id) {
     const m = await this.load(id);
     if (this.active?.id === id) {
+      if(this.active.station)m.station=retainStation(m.station,this.active.station,this.active.stationRequested);
       m.scan = { ...this.active.status };
       m.cells = this.active.scanner.grid();
     }
@@ -86,11 +90,34 @@ export class MapService {
       vectors: m.structure?.walls.filter(w=>w.observations>=2).map(w=>w.points) || (checkpoint?.backend==="slam_toolbox" ? [] : supportedWalls(m.cells, this.active?.id===id ? this.active.scanner.keyframes : checkpoint?.keyframes)),
     };
   }
+  async refreshStructure(id) {
+    const snapshot = await this.navigation.call("structure");
+    if(snapshot?.map_id !== id || !snapshot.grid || !snapshot.keyframes?.length) throw Error("No corrected scan evidence available for this map");
+    return this.serial(async()=>{
+      const m=await this.load(id),scanner=new GraphScanner(m.checkpoint);
+      scanner.acceptStructure(snapshot);
+      const evidence=scanner.structuralSnapshot;
+      m.structure=structuralPlan(evidence.cells,{...m.structure,sequence:null},snapshot.sequence,snapshot.keyframes);
+      await this.save(m);
+      return {walls:m.structure.walls.length};
+    });
+  }
+  async position(id) {
+    this.path(id);
+    // Coalesce viewers, keep high-rate marker reads out of map persistence and
+    // autonomous heartbeat/ownership paths. Both calls are read-only.
+    if (!this.positionTask || performance.now() - this.positionAt > 120) {
+      this.positionAt = performance.now();
+      this.positionTask = Promise.allSettled([this.engine.onboardReturn(), this.navigation.call("status")]);
+    }
+    const [engine, nav] = await this.positionTask;
+    return livePosition(id, engine.status==='fulfilled'?engine.value:null, nav.status==='fulfilled'?nav.value:null);
+  }
   async remove(id) {
     this.path(id);
     // Stop immediately; queued work must observe the new epoch before driving.
     this.epoch++;
-    if (this.active?.id === id && this.active.status.state === "scanning") {
+    if (this.active?.id === id && ["scanning","locating"].includes(this.active.status.state)) {
       this.active.status.state = "paused";
       clearTimeout(this.timer);
       try { await this.navigation.call("pause"); } finally { await this.engine.stop(); }
@@ -235,9 +262,69 @@ export class MapService {
   summary() {
     return this.active ? { id: this.active.id, ...this.active.status } : null;
   }
+  async returnOnboard(id) {
+    const intent=++this.epoch;
+    const running=await this.engine.onboardReturn();
+    if(running.active){if(running.map_id!==id)throw Error("Engine is returning on another map");return running;}
+    const map=await this.load(id),grid=map.checkpoint?.nativeGrid;
+    if(map.station?.source!=="docked-robot-pose" || !grid?.cells?.length)throw Error("A saved map and verified station are required");
+    const enclosure=JSON.parse(await readFile(new URL("../../../mapping/calibration/dock-enclosure.json",import.meta.url),"utf8")).points;
+    if(this.epoch!==intent)throw Error("Onboard return preparation cancelled");
+    await this.pauseActive();
+    const epoch=this.epoch;
+    // Stop a running companion before handing ownership to the robot. Its
+    // availability is not required when no HQ motion operation exists.
+    const {x,y,theta}=map.station;
+    await this.engine.onboardReturn("config",{map_id:id,width:grid.width,height:grid.height,resolution:grid.resolution,origin:grid.origin,cells:grid.cells,station:{x,y,theta},enclosure});
+    if(this.epoch!==epoch)throw Error("Onboard return preparation cancelled");
+    await this.engine.onboardReturn("start");
+    return this.engine.onboardReturn();
+  }
+  async returnToStation(id) {
+    const map=await this.load(id);
+    if(!map.station || map.station.source!=="docked-robot-pose")throw Error("Locate the station on this map first.");
+    if((await this.engine.dockStatus()).docked)throw Error("Alfred is already docked.");
+    // Explicit custom return replaces only the native return job, never cleaning.
+    const native=await this.engine.nativeMapping("status"),work=native.reports?.["/task/WorkState"]?.bytes;
+    if(work?.[2]!==0){
+      if(work?.[0]!==5)throw Error("End the current firmware task before custom return.");
+      await this.engine.stopNativeReturn();
+    }
+    await this.pauseActive();
+    await this.scan(id,"resume",{mode:"manual",allowMotion:true});
+    const active=this.active;
+    if(!active || active.id!==id || !["locating","scanning"].includes(active.status.state))throw Error("Map preparation did not start.");
+    active.returnPending=true;active.returnStation=map.station;active.returnStartedAt=Date.now();
+    active.status.customReturn={state:"preparing",message:"Finding Alfred before returning to the station"};
+    if(active.status.state==="scanning")await this.startCustomReturn(active);
+    return this.get(id);
+  }
+  async startCustomReturn(active) {
+    const epoch=this.epoch;
+    await this.engine.connect?.();
+    if(this.active!==active || this.epoch!==epoch || active.status.state!=="scanning")return;
+    const nav=await this.navigation.call("status");
+    if(this.active!==active || this.epoch!==epoch || active.status.state!=="scanning")return;
+    const pose=nav.mapping?.pose;
+    if(!pose || (!nav.ready && Math.hypot(pose.x-active.returnStation.x,pose.y-active.returnStation.y)>1)){
+      active.returnReadySince ||= Date.now();
+      active.status.message="Preparing the route to the station";
+      active.status.customReturn={state:"preparing",message:active.status.message};
+      if(Date.now()-active.returnReadySince>30000)throw Error("Station route could not become ready within 30 seconds");
+      return;
+    }
+    active.status.customReturn=await this.navigation.call("dock",{map_id:active.id,station:active.returnStation});
+    active.returnPending=false;
+  }
+  get ownsMotion() {
+    const a=this.active;
+    return !!a && ["scanning","locating"].includes(a.status.state) &&
+      (a.status.mode === "explore" || a.status.localization === "locating" ||
+       !!a.returnPending || !!a.status.customReturn && !["failed","docked","cancelled"].includes(a.status.customReturn.state));
+  }
   get exploring() {
     return (
-      this.active?.status.mode === "explore" &&
+      (this.active?.status.mode === "explore" || this.active?.status.customReturn && !["failed","docked","cancelled"].includes(this.active.status.customReturn.state)) &&
       this.active.status.state === "scanning"
     );
   }
@@ -265,10 +352,12 @@ export class MapService {
         m.displayAngle=Math.atan2(vector[1],vector[0])*45/Math.PI;
       }
     }
+    active.wallCandidates=[...(active.status.deep && m.structure?.floor?.boundary?.length ? [] : m.structure?.walls.filter(w=>w.observations>=2).map(({id,points})=>({id,points}))||[]),...(m.structure?.floor?.boundary||[]).filter(e=>(active.status.deep || e.kind==='unobserved')&&Math.hypot(e.points[1][0]-e.points[0][0],e.points[1][1]-e.points[0][1])>=(active.status.deep ? .3 : .8)).map((e,i)=>({id:`edge-${i}`,points:e.points,unknown:e.kind==='unobserved'}))].slice(0,200);
+    if(active.station){m.station=retainStation(m.station,active.station,active.stationRequested);active.station=m.station;}
     m.scan = {
       ...active.status,
       state:
-        active.status.state === "scanning"
+        ["scanning","locating"].includes(active.status.state)
           ? "interrupted"
           : active.status.state,
     };
@@ -419,8 +508,8 @@ export class MapService {
   }
   schedule() {
     clearTimeout(this.timer);
-    if (this.active?.status.state === "scanning")
-      this.timer = setTimeout(() => this.tick(), this.exploring ? 70 : 300);
+    if (["scanning","locating"].includes(this.active?.status.state))
+      this.timer = setTimeout(() => this.tick(), this.active?.status.customReturn ? 300 : this.exploring ? 70 : 300);
     this.timer?.unref();
   }
   async tick() {
@@ -496,6 +585,57 @@ export class MapService {
     }).catch(() => {});
     this.schedule();
   }
+  prepareManualDrive(vector) {
+    const a=this.active;
+    if(!a || a.status.mode!=="manual" || a.status.state!=="scanning" || !a.status.docked ||
+       (!vector.linear && !vector.angular) || Date.now()-(a.manualWakeReadyAt||0)<5000)return;
+    if(!a.manualWakeTask){
+      a.manualWakeTask=this.engine.wakeForMapping().then(()=>{a.manualWakeReadyAt=Date.now();a.manualWakeError=null;})
+        .catch(error=>{a.manualWakeError=error.message;}).finally(()=>{a.manualWakeTask=null;});
+    }
+    // Held cockpit input retries. No delayed velocity is queued behind wake.
+    throw Error(a.manualWakeError || "Waking mapping sensors; keep the drive control held.");
+  }
+  observeGraphStation(active) {
+    if(!this.engine.dockStatus || active.stationTask || Date.now()-(active.lastStationCheck||0)<2000)return;
+    active.lastStationCheck=Date.now();
+    active.stationTask=this.engine.dockStatus().then(dock=>{
+      if(this.active===active)active.dockObservation=dock;
+      // Use the current tracked pose after the asynchronous sensor read. Never
+      // attach a response to a map that was switched, paused or lost tracking.
+      if(this.active!==active || active.status.state!=="scanning" || active.telemetryFaultSince ||
+         Date.now()-(active.status.observedAt||0)>750 || !dock.docked)return;
+      const observed=stationObservation(dock,active.status.pose,active.status.localization);
+      if(!active.station || Math.hypot(active.station.x-observed.x,active.station.y-observed.y)>.05){
+        active.station=retainStation(active.station,observed,active.stationRequested);active.lastSave=0;
+      }
+    }).catch(error=>diagnosticState("mapping-station","unavailable",{error:error.message}))
+      .finally(()=>{active.stationTask=null;});
+    return active.stationTask;
+  }
+  async completeGraphLocation(active) {
+    await this.navigation.call("mapping/pause");
+    active.status.state="paused";
+    active.status.localization="located";
+    active.status.error=null;
+    active.status.message="Position found";
+    active.pendingAction=null;
+    if(!this.engine.dockStatus)return;
+    try {
+      const dock=await this.engine.dockStatus();
+      if(dock.docked){
+        active.station=retainStation(active.station,stationObservation(dock,active.status.pose,active.status.localization),active.stationRequested);
+        active.status.message="Position found. Station marked.";
+      } else if(active.station?.method==="measured-departure") {
+        active.status.message="Position found. Station marked from measured departure.";
+      } else if(active.stationRequested) {
+        active.status.message="Position found, but charging contact is no longer detected. Station not updated.";
+      }
+    } catch(error) {
+      diagnosticState("mapping-station","unavailable",{error:error.message});
+      if(active.stationRequested)active.status.message="Position found. Station detection unavailable; marker not updated.";
+    }
+  }
   async graphScan(m,action,options,requestedEpoch){
     const id=m.id;
     if(["pause","finish"].includes(action)){
@@ -503,41 +643,70 @@ export class MapService {
       if(this.active?.id===id){
         const structure=await this.navigation.call("structure");
         if(structure?.map_id===id)this.active.scanner.acceptStructure(structure);
-        this.active.status.state=action==="finish"?"finished":"paused";this.active.status.message=action==="finish"?"Map saved.":"Paused.";
+        this.active.status.state=action==="finish"?"finished":"paused";if(this.active.status.localization==="locating")this.active.status.localization="cancelled";this.active.pendingAction=null;this.active.status.error=null;this.active.status.message=action==="finish"?"Map saved.":"Paused.";
         await this.checkpoint(this.active);if(action==="finish")this.active=null;
       }
       return this.get(id);
     }
     if(!["start","resume","locate"].includes(action))throw Error("Unknown mapping action.");
+    if(this.active?.status.state==="locating"){
+      if(this.active.id===id && action==="locate")return this.get(id);
+      throw Error("Position search is in progress. Pause it before starting another operation.");
+    }
     if(this.active?.status.state==="scanning")throw Error("Pause the current scan first.");
-    const mode=options.mode||m.scan.mode||"explore",minutes=Number(options.minutes??m.scan.minutes??10);
+    // Locate observes position; it must not replace the saved exploration setup.
+    const scanOptions=action==="locate"?{}:options;
+    const deep=scanOptions.mode==="deep" || (scanOptions.mode==null && !!m.scan.deep);
+    const mode=scanOptions.mode==="deep"?"explore":scanOptions.mode||m.scan.mode||"explore",minutes=Number(scanOptions.minutes??m.scan.minutes??10);
     if(!["manual","explore"].includes(mode)||!Number.isFinite(minutes)||minutes<1||minutes>60)throw Error("Invalid scan options.");
     if(action==="start" && m.cells.length)throw Error("Use Resume to extend this map.");
-    await this.engine.wakeForMapping(options.signal);
-    const native=await this.engine.nativeMapping("status");
-    if(native.reports?.["/task/WorkState"]?.bytes?.[2]!==0)throw Error("Stop the firmware task before HQ mapping.");
+    let stationPrior, docked=false;
+    if(this.engine.dockStatus && (action==="locate" || options.station || m.station)){
+      const detected=await this.engine.dockStatus().catch(error=>{if(options.station)throw error;return null;});
+      if(options.station && !detected.docked)throw Error("Charging contacts do not detect the station. Dock Alfred before locating it.");
+      if(detected?.docked && m.station?.source=== "docked-robot-pose" && ["x","y","theta"].every(k=>Number.isFinite(m.station[k])))stationPrior=m.station;
+      docked=!!detected?.docked;
+      m.stationDetection=detected;await this.save(m);
+    }
+    const wake=await this.engine.wakeForMapping(options.signal);
+    let native=await this.engine.nativeMapping("status");
+    let firmwareWork=native.reports?.["/task/WorkState"]?.bytes;
+    // Our zero-speed wake enters native remote mode briefly. Observe it ending;
+    // never cancel another controller or assume a persistent task is ours.
+    for(let attempt=0;wake?.woke && firmwareWork?.[0]===9 && firmwareWork[2]!==0 && attempt<4;attempt++){
+      await new Promise(resolve=>setTimeout(resolve,1000));
+      options.signal?.throwIfAborted();if(this.epoch!==requestedEpoch)throw Error("Scan cancelled.");
+      native=await this.engine.nativeMapping("status");
+      firmwareWork=native.reports?.["/task/WorkState"]?.bytes;
+    }
+    if(!firmwareWork || firmwareWork.length<3)throw Error("Firmware task status unavailable. Mapping has not started.");
+    if(firmwareWork[2]!==0){
+      const task={0:"automatic cleaning",1:"area cleaning",2:"custom cleaning",3:"edge cleaning",4:"AI cleaning",5:"return-to-station",6:"go-to",8:"relocation",9:"remote control",10:"AI guide",11:"checkpoint",12:"patrol",13:"dust collection",15:"native mapping"}[firmwareWork[0]]||`task ${firmwareWork[0]}`;
+      throw Error(`Firmware ${task} is ${firmwareWork[2]===2?"paused":"active"}. End that task before HQ mapping.`);
+    }
     await this.engine.nativeMapping("backend-off");await this.engine.nativeMapping("pause");
     let nav,grid;
     try{
-      const preparation=await this.navigation.call(`mapping/${action}`,{id,boot_id:native.boot_id});
+      const preparation=await this.navigation.call(`mapping/${action}`,{id,boot_id:native.boot_id,station_prior:stationPrior,docked,allow_motion:action==="locate" || options.allowMotion===true});
       if(preparation.location?.state==="locating"){
         const scanner=new GraphScanner(m.checkpoint);
-        this.active={id,scanner,pendingAction:action,locatingSince:Date.now(),lastSave:0,lastGrid:0,deadline:Date.now()+minutes*60000,status:{backend:"slam_toolbox",mode,minutes,state:"scanning",localization:"locating",pose:null,frames:scanner.frames,message:preparation.location.message,error:null}};
+        this.active={id,scanner,station:m.station,stationRequested:!!options.station,pendingAction:action,locatingSince:Date.now(),lastSave:0,lastGrid:0,deadline:Date.now()+minutes*60000,status:{backend:"slam_toolbox",mode,deep,deepPass:deep?m.scan.deepPass:null,minutes,state:"locating",localization:"locating",pose:null,frames:scanner.frames,message:preparation.location.message,error:null}};
         options.signal?.throwIfAborted();if(this.epoch!==requestedEpoch)throw Error("Scan cancelled.");
         this.epoch++;await this.checkpoint(this.active);this.schedule();return this.get(id);
       }
       for(let attempt=0;attempt<20;attempt++){
         options.signal?.throwIfAborted();if(this.epoch!==requestedEpoch)throw Error("Scan cancelled.");
         [nav,grid]=await Promise.all([this.navigation.call("status"),this.navigation.call("grid")]);
-        if(nav.ready && nav.mapping.pose && grid?.cells.length)break;
+        if((mode==="manual" || nav.ready) && nav.mapping.pose && grid?.cells.length)break;
         await new Promise(resolve=>setTimeout(resolve,200));
       }
-      if(!nav.ready || !grid?.cells.length)throw Error("Waiting for SLAM position and map.");
+      if((mode!=="manual" && !nav.ready) || !nav.mapping.pose || !grid?.cells.length)throw Error("Waiting for SLAM position and map.");
       const scanner=new GraphScanner(action==="resume"?m.checkpoint:null),lidar=await this.engine.lidar();
       const quality=scanner.update(grid,{boot_id:native.boot_id,pose:nav.mapping.pose},lidar.result);
-      this.active={id,scanner,lastSave:0,lastGrid:Date.now(),deadline:Date.now()+minutes*60000,status:{...quality,mode,minutes,state:"scanning",message:mode==="explore"?"Exploring":"Capturing map",error:null}};
+      this.active={id,scanner,station:m.station,stationRequested:!!options.station,lastSave:0,lastGrid:Date.now(),deadline:Date.now()+minutes*60000,status:{...quality,mode,deep,deepPass:deep?m.scan.deepPass:null,minutes,state:"scanning",message:mode==="explore"?"Exploring":"Capturing map",error:null}};
       options.signal?.throwIfAborted();if(this.epoch!==requestedEpoch)throw Error("Scan cancelled.");
-      if(mode==="explore")await this.navigation.call("start");
+      if(action==="locate")await this.completeGraphLocation(this.active);
+      else if(mode==="explore"){await this.checkpoint(this.active);await this.navigation.call("start",{deep,deep_pass:this.active.status.deepPass,walls:this.active.wallCandidates});}
       options.signal?.throwIfAborted();if(this.epoch!==requestedEpoch)throw Error("Scan cancelled.");
       this.epoch++;await this.checkpoint(this.active);this.schedule();return this.get(id);
     }catch(error){
@@ -548,35 +717,65 @@ export class MapService {
   }
   async graphTick(){
     await this.serial(async()=>{
-      const a=this.active,epoch=this.epoch;if(!a||a.status.state!=="scanning")return;
+      const a=this.active,epoch=this.epoch;if(!a||!["scanning","locating"].includes(a.status.state))return;
       try{
-        const [nav,lidar,grid]=await Promise.all([this.navigation.call("heartbeat"),this.engine.lidar(),Date.now()-a.lastGrid>900?this.navigation.call("grid"):null]);
+        const [nav,lidar,grid]=await Promise.all([this.navigation.call("heartbeat",{walls:a.wallCandidates||[]}).catch(error=>{throw Error("Controller heartbeat: "+error.message);}),this.engine.lidar().catch(error=>{throw Error("LiDAR read: "+error.message);}),Date.now()-a.lastGrid>900?this.navigation.call("grid").catch(error=>{throw Error("Map read: "+error.message);}):null]);
         if(epoch!==this.epoch)return;
+        a.returnFaultSince=null;
         if(!a.structureTask && Date.now()-(a.lastStructure||0)>5000){
           a.lastStructure=Date.now();
           a.structureTask=this.navigation.call("structure",{sequence:a.scanner.structuralSnapshot?.sequence}).then(structure=>{
             if(this.active===a && epoch===this.epoch && structure?.map_id===a.id)a.scanner.acceptStructure(structure);
           }).catch(error=>diagnosticState("mapping-structure","unavailable",{error:error.message})).finally(()=>{a.structureTask=null;});
         }
+        if(nav.mapping.location?.state==="locating" && a.status.localization!=="locating"){
+          a.status.state="locating";a.status.localization="locating";a.status.pose=null;
+          a.pendingAction="resume";a.locatingSince=Date.now();
+          a.status.message=nav.mapping.location.message;
+        }
         if(a.status.localization==="locating"){
           if(nav.mapping.location.state==="failed")throw Error(nav.mapping.location.message);
-          if(nav.mapping.location.state!=="located" || !nav.ready || !nav.mapping.pose){
+          if(nav.mapping.location.state!=="located" || (a.status.mode!=="manual" && !nav.ready) || !nav.mapping.pose){
             a.locatingSince ||= Date.now();
             a.status.message=nav.mapping.location.state==="located" ? (nav.mapping.tracking_error || nav.message || "Starting navigation") : nav.mapping.location.message;
-            if(Date.now()-a.locatingSince>15000)throw Error(`${a.status.message}. Preparation timed out; scan paused.`);
+            if(Date.now()-a.locatingSince>(a.pendingAction==="locate" || a.returnPending?75000:25000))throw Error(`${a.status.message}. Preparation timed out; scan paused.`);
             return;
           }
           if(nav.mapping.map_id!==a.id)throw Error("Localized map does not match this scan.");
           Object.assign(a.status,a.scanner.update(grid,{boot_id:nav.mapping.boot_id,pose:nav.mapping.pose},lidar.result),{localization:"located",message:"Position found"});
           if(a.pendingAction==="locate"){
-            await this.navigation.call("mapping/pause");a.status.state="paused";await this.checkpoint(a);return;
+            const station=nav.mapping.location.station;
+            if(station?.method==="measured-departure" && ["x","y","theta"].every(k=>Number.isFinite(station[k])))a.station=retainStation(a.station,{...station,label:"Station"},a.stationRequested);
+            await this.completeGraphLocation(a);
+            await this.checkpoint(a);return;
           }
-          if(a.status.mode==="explore")await this.navigation.call("start");
-          a.pendingAction=null;await this.checkpoint(a);return;
+          if(a.status.mode==="explore")await this.navigation.call("start",{deep:a.status.deep,deep_pass:a.status.deepPass,walls:a.wallCandidates||[]});
+          a.status.state="scanning";a.pendingAction=null;await this.checkpoint(a);return;
         }
         if(nav.mapping.map_id!==a.id || !nav.mapping.capture)throw Error("Mapping session changed; scan paused.");
+        if(a.returnPending){await this.startCustomReturn(a);return;}
+        if(a.status.customReturn && nav.docking){
+          a.status.customReturn=nav.docking;
+          if(!nav.mapping.pose && nav.docking.pose && !nav.docking.error)nav.mapping.pose=nav.docking.pose;
+          if(["docked","failed"].includes(nav.docking.state)){
+            if(nav.docking.error?.includes("Firmware task"))await this.engine.stopNativeReturn().catch(()=>{});
+            await this.engine.stop();
+            if(nav.mapping.pose)Object.assign(a.status,a.scanner.update(grid,{boot_id:nav.mapping.boot_id,pose:nav.mapping.pose},lidar.result));
+            if(nav.docking.state==="docked")await this.observeGraphStation(a);
+            await this.navigation.call("mapping/pause");
+            a.status.state="paused";a.status.message=nav.docking.message;a.status.error=nav.docking.error;
+            await this.checkpoint(a);return;
+          }
+        }
+        this.observeGraphStation(a);
         const age=scanAge(lidar.result);
-        const telemetryIssue=age>750 ? `LiDAR is stale (${Math.round(age)} ms)` : (!nav.ready || !nav.mapping.pose) ? (nav.mapping.tracking_error || nav.message || "Mapping position unavailable") : null;
+        a.status.docked=!!(a.dockObservation?.docked && Date.now()-a.dockObservation.observedAt<5000);
+        if(a.status.mode==="manual" && a.status.docked && age>750){
+          a.telemetryFaultSince=null;a.status.error=null;a.status.message="Docked. Map saved; drive to continue.";
+          if(Date.now()-a.lastSave>2000)await this.checkpoint(a);
+          return;
+        }
+        const telemetryIssue=age>750 ? `LiDAR is stale (${Math.round(age)} ms)` : ((a.status.mode!=="manual" && !nav.ready) || !nav.mapping.pose) ? (nav.mapping.tracking_error || nav.message || "Mapping position unavailable") : null;
         if(telemetryIssue){
           a.telemetryFaultSince ||= Date.now();
           a.status.message=`Stopped while recovering: ${telemetryIssue}`;
@@ -589,17 +788,31 @@ export class MapService {
         if(a.status.mode==="explore"&&!nav.active)throw Error(nav.stop_reason||nav.message||"Navigation paused.");
         Object.assign(a.status,a.scanner.update(grid,{boot_id:nav.mapping.boot_id,pose:nav.mapping.pose},lidar.result));if(grid)a.lastGrid=Date.now();
         a.status.message=a.status.mode==="explore"?nav.message:"Capturing map. Drive from Cockpit.";a.status.path=nav.path||[];a.status.graphNodes=nav.mapping.graph_nodes;a.status.graphEdges=nav.mapping.graph_edges;a.status.observedAt=Date.now();
-        if((a.status.mode==="explore"&&nav.exploration==="exploration_complete")||Date.now()>a.deadline){
+        if(a.status.customReturn)a.status.message=a.status.customReturn.message;
+        if(nav.wall_verifications)a.status.wallVerifications=nav.wall_verifications;
+        if(a.status.deep && nav.deep_pass)a.status.deepPass=nav.deep_pass;
+        if(nav.frontiers?.markers){
+          a.status.boundaryMarkers=nav.frontiers.markers;
+          a.status.unresolvedFrontiers=nav.frontiers.disconnected;
+        }
+        if(a.status.mode==="explore" && (nav.exploration==="exploration_complete"||Date.now()>a.deadline)){
           await this.navigation.call("mapping/pause");
-          const remaining=nav.frontiers?.disconnected||0;
+          const remaining=nav.frontiers?.total??nav.frontiers?.disconnected??0;
+          const deepRemaining=a.status.deepPass?.remaining||0;
+          const unfinished=(nav.wall_verifications||[]).filter(v=>["not_reached","approach_blocked"].includes(v.result)&&!(nav.wall_verifications||[]).some(q=>["contact","close_scan","observed"].includes(q.result)&&Math.hypot(q.point[0]-v.point[0],q.point[1]-v.point[1])<.55)).length;
           a.status.unresolvedFrontiers=remaining;
-          a.status.state=nav.failed_goals||remaining?"paused":"finished";
-          a.status.message=remaining?`${remaining} unmapped boundaries remain beyond blocked routes. Map saved for Resume.`:nav.failed_goals?"Some areas could not be reached; map saved for another attempt.":"Map saved.";
+          a.status.state=nav.failed_goals||remaining||unfinished||deepRemaining||Date.now()>a.deadline?"paused":"finished";
+          a.status.message=deepRemaining?`Deep pass saved: ${a.status.deepPass.verified}/${a.status.deepPass.total} sections checked. ${deepRemaining} still need inspection.`:remaining?`${remaining} unmapped boundaries need another approach. Map saved for Resume.`:unfinished?`${unfinished} surface checks remain unfinished. Map saved for Resume.`:nav.failed_goals?"Some areas have not been reached yet. Map saved for Resume.":Date.now()>a.deadline?"Scan time reached. Map saved for Resume.":"Map saved.";
         }
         if(Date.now()-a.lastSave>2000||a.status.state!=="scanning")await this.checkpoint(a);
       }catch(error){
         if(epoch!==this.epoch)return;
-        a.status.state="paused";a.status.error=error.message;a.status.message=error.message;this.epoch++;
+        if(a.status.customReturn && /timeout|timed out|fetch failed|socket|ECONN|aborted/i.test(error.message)){
+          a.returnFaultSince ||= Date.now();
+          await this.engine.stop().catch(()=>{});
+          if(Date.now()-a.returnFaultSince<5000){a.status.message="Reconnecting while returning: "+error.message;return;}
+        }
+        a.status.state="paused";if(a.status.localization==="locating")a.status.localization="failed";a.pendingAction=null;a.status.error=error.message;a.status.message=error.message;this.epoch++;
         try{await this.navigation.call("mapping/pause");}catch{}try{await this.engine.stop();}catch{}await this.checkpoint(a);
       }
     }).catch(()=>{});this.schedule();
@@ -662,7 +875,7 @@ export class MapService {
   }
   async nativeTick(){
     await this.serial(async()=>{
-      const a=this.active,epoch=this.epoch;if(!a||a.status.state!=="scanning")return;
+      const a=this.active,epoch=this.epoch;if(!a||!["scanning","locating"].includes(a.status.state))return;
       try {
         const [status,lidar,grid]=await Promise.all([this.engine.nativeMapping("status"),this.engine.lidar(),Date.now()-a.lastGrid>900?this.engine.nativeMapping("grid"):null]);
         if(epoch!==this.epoch)return;
@@ -678,7 +891,7 @@ export class MapService {
         if(Date.now()-a.lastSave>2000 || a.status.state!=="scanning")await this.checkpoint(a);
       }catch(error){
         if(epoch!==this.epoch)return;
-        a.status.state="paused";a.status.error=error.message;a.status.message=error.message;this.epoch++;
+        a.status.state="paused";if(a.status.localization==="locating")a.status.localization="failed";a.pendingAction=null;a.status.error=error.message;a.status.message=error.message;this.epoch++;
         try{await this.navigation.call("pause");}catch{}
         try{await this.engine.stop();await this.engine.nativeMapping("pause");}catch{}
         await this.checkpoint(a);
@@ -688,7 +901,7 @@ export class MapService {
   }
   async stopExploration() {
     this.epoch++;
-    if (this.active?.status.mode === "explore")
+    if (this.ownsMotion)
       return this.scan(this.active.id, "pause");
   }
   async pauseActive() {

@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
+import {tmpdir} from 'node:os';
 import { fileURLToPath } from 'node:url';
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -9,6 +10,7 @@ const directory = path.join(root, 'artifacts/hq');
 const settingsFile = path.join(directory, 'speech.json');
 const voices = [{ id: 'Daniel', label: 'Daniel · Male (British English)' }, { id: 'Samantha', label: 'Samantha · Female (American English)' }];
 export class SpeechService {
+  constructor(engine){this.engine=engine;}
   busy = false;
   async settings() {
     let voice = 'Daniel';
@@ -30,7 +32,15 @@ export class SpeechService {
     this.busy = true;
     try {
       const { voice } = await this.settings();
-      await exec('python3', [path.join(root, 'runtime/alfred.py'), 'say', '--voice', voice, '--', text.trim()], { timeout: 15000, maxBuffer: 65536 });
+      const temp=await mkdtemp(path.join(tmpdir(),'alfred-speech-'));
+      try {
+        await writeFile(path.join(temp,'text.txt'),text.trim());
+        await exec('say',['-v',voice,'-o',path.join(temp,'speech.aiff'),'-f',path.join(temp,'text.txt')],{timeout:15000});
+        await exec('ffmpeg',['-hide_banner','-loglevel','error','-y','-i',path.join(temp,'speech.aiff'),'-ar','16000','-ac','1','-c:a','libvorbis',path.join(temp,'speech.ogg')],{timeout:15000});
+        const clip=await readFile(path.join(temp,'speech.ogg'));
+        const response=await this.engine.request('/v1/audio/play',15000,{method:'POST',headers:{'content-type':'audio/ogg','content-length':String(clip.length)},body:clip});
+        if(!response.ok)throw Error('Robot audio playback failed');
+      } finally {await rm(temp,{recursive:true,force:true});}
       this.speakingUntil = Date.now() + Math.max(3000, text.length * 100 + 2000);
       return { voice, message: 'Sent to Alfred' };
     } finally { this.busy = false; }

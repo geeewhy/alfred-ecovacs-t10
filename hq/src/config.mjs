@@ -12,7 +12,8 @@ export async function loadConfig() {
     host: process.env.HQ_HOST ?? "127.0.0.1",
     port: Number(process.env.HQ_PORT ?? 4173),
     publicDirectory: path.join(root, "hq/public"),
-    engineForwardPort: Number(process.env.HQ_ENGINE_PORT ?? 48765),
+    engineUrl: process.env.HQ_ENGINE_URL ?? `http://${robot.wifi_address}:8765`,
+    engineToken: (await readFile(path.join(root,"artifacts/engine-token"),"utf8").catch(()=>"")).trim(),
     robot: {
       id: "alfred",
       name: "Alfred",

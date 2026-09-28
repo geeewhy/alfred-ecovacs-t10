@@ -44,3 +44,11 @@ test('continuous wall fitting retains perpendicular walls among scattered clutte
  assert.ok(lines.some(([a,b])=>Math.abs(b[1]-a[1])>2 && Math.abs(b[0]-a[0])<.1),'retain the continuous vertical wall');
  assert.ok(lines.some(([a,b])=>Math.abs(b[0]-a[0])>3 && Math.abs(b[1]-a[1])<.1),'retain the continuous horizontal wall');
 });
+
+test('nearby later viewpoints support a stable wall even when early scans saw other surfaces',()=>{
+ const cells=wall(0,60),points=cells.map(([x,y])=>[(x+.5)*.05,(y+.5)*.05]);
+ const frames=[{pose:{x:0,y:1},points:[]},{pose:{x:.5,y:1},points:[]},{pose:{x:1,y:1},points:[]},
+ {pose:{x:.15,y:1},points},{pose:{x:.3,y:1},points}];
+ assert.equal(supportedWalls(cells,frames).length,1);
+ assert.equal(supportedWalls(cells,[frames[3],{...frames[3]}, {...frames[3]}]).length,0,'stationary repeats are not independent viewpoints');
+});

@@ -85,7 +85,8 @@ impl RosPublisher {
                     let _ = tokio::time::timeout(
                         std::time::Duration::from_secs(1),
                         register_publisher(&topic, rpc_port),
-                    ).await;
+                    )
+                    .await;
                 }
             }
         });
@@ -114,6 +115,8 @@ impl RosPublisher {
     }
 
     async fn serve_subscriber(&self, mut stream: TcpStream) -> Result<(), String> {
+        // Tiny wheel frames must not wait for Nagle/delayed ACK batching.
+        stream.set_nodelay(true).map_err(io_string)?;
         read_frame(&mut stream, 64 * 1024).await?;
         write_publisher_header(&mut stream, &self.topic).await?;
         let mut messages = self.messages.subscribe();

@@ -78,7 +78,7 @@ export function parseStatus(raw, robot, latencyMs, observedAt) {
       mac: wifi.mac ?? robot.mac_address,
       signalDbm: number(wifi.signal),
       linkQuality: number(wifi.quality),
-      transport: "Authenticated ADB over Wi-Fi",
+      transport: "Authenticated engine over Wi-Fi",
     },
     services: {
       engine: Boolean(services.engine),
