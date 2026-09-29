@@ -288,6 +288,35 @@ impl LocalizationService {
         });
         service
     }
+    pub async fn navigation_scan(&self, scan: &LidarScan) -> Option<(Pose, Vec<[f64; 2]>)> {
+        let s = self.state.lock().await;
+        let pose = s.pose?;
+        if !s
+            .matched
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(2))
+        {
+            return None;
+        }
+        let at = interpolate(&s.history, scan.source_stamp)?;
+        let corrected = deskew(scan, &s.history, 0.2)?;
+        Some((
+            advance(pose, s.odom, at),
+            corrected
+                .points
+                .iter()
+                .filter(|p| p.power > 0.)
+                .map(|p| [p.x as f64 / 1000., p.y as f64 / 1000.])
+                .collect(),
+        ))
+    }
+    pub async fn navigation_map(&self) -> Option<ReturnMap> {
+        self.state
+            .lock()
+            .await
+            .map
+            .as_ref()
+            .map(|m| m.geometry.map.clone())
+    }
     pub async fn install(&self, mut config: Config) -> Result<(), String> {
         let _gate = self.configure_gate.lock().await;
         {

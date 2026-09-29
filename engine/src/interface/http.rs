@@ -10,7 +10,7 @@ use crate::components::map_evidence::{EvidenceMap, Reference};
 use crate::components::mapping::{NativeMapping, NativeSnapshot};
 use crate::components::reflectance::{FilterRequest, Model, ReflectanceService};
 use crate::components::return_geometry::ReturnMap;
-use crate::components::return_to_station::ReturnService;
+use crate::components::return_to_station::{NavigationGoal, ReturnService};
 use crate::components::telemetry::{BatteryStatus, BatteryTelemetry};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, State};
@@ -126,6 +126,8 @@ impl HttpRuntime {
             .route("/v1/mapping/reflectance/filter", post(reflection_filter))
             .route("/v1/mapping/reflectance/model", put(reflection_install))
             .route("/v1/mapping/reflectance/model/{id}", get(reflection_model))
+            .route("/v1/navigation", get(return_status).post(start_navigation))
+            .route("/v1/navigation/stop", post(stop_return))
             .route("/v1/return", get(return_status).post(start_return))
             .route("/v1/return/stop", post(stop_return))
             .route("/v1/return/config", put(return_config))
@@ -682,6 +684,19 @@ async fn native_return_stop(State(state): State<HttpState>) -> impl IntoResponse
 
 async fn return_status(State(state): State<HttpState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({"ok":true,"result":state.returning.status().await}))
+}
+async fn start_navigation(
+    State(state): State<HttpState>,
+    Json(goal): Json<NavigationGoal>,
+) -> impl IntoResponse {
+    let _gate = state.returning.gate.lock().await;
+    result(
+        state
+            .returning
+            .navigate(goal)
+            .await
+            .map(|_| "Engine navigation started".into()),
+    )
 }
 async fn start_return(State(state): State<HttpState>) -> impl IntoResponse {
     let _gate = state.returning.gate.lock().await;

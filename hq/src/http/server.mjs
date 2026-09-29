@@ -42,6 +42,7 @@ export class HqServer {
         else if (id && action === "structure-refresh" && request.method === "POST") result = await this.maps.refreshStructure(id);
         else if (id && action === "position" && request.method === "GET") result = await this.maps.position(id);
         else if (id && action === "edit" && request.method === "POST") result = await this.maps.edit(id, await readJson(request));
+        else if (id && action === "navigate" && request.method === "POST") result = await this.maps.navigateTo(id, await readJson(request));
         else if (id && action === "return-onboard" && request.method === "POST") result = await this.maps.returnOnboard(id);
         else if (id && action === "return" && request.method === "POST") result = await this.maps.returnToStation(id);
         else if (id && action === "scan" && request.method === "POST") {

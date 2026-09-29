@@ -2,7 +2,7 @@
 export function livePosition(id, onboard, navigation, localization) {
   const valid = p => p && ['x','y','theta'].every(k=>Number.isFinite(p[k]));
   if (onboard?.active && onboard.map_id===id) {
-    const tracking = ['approaching','rear-alignment','staging','entering','clearing-entry','reseating','confirming'].includes(onboard.state);
+    const tracking = ['navigating','checking-approach','replanning','goal-alignment','approaching','rear-alignment','staging','entering','clearing-entry','reseating','confirming'].includes(onboard.state);
     return {pose:tracking && !/waiting|obstruct|stale/i.test(onboard.message || "") && valid(onboard.pose)?onboard.pose:null,message:onboard.message || 'Onboard localization pending'};
   }
   if(localization!==undefined){

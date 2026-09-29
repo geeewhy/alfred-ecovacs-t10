@@ -17,6 +17,40 @@ use std::sync::Arc;
 async fn main() -> std::io::Result<()> {
     // Offline replay mode never constructs ROS publishers or a motor service.
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--navigation-replay") {
+        if args.len() != 4 {
+            return Err(std::io::Error::other(
+                "usage: --navigation-replay MAP_JSON INPUT_JSON",
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        struct Input {
+            pose: components::return_geometry::Pose,
+            goal: components::return_geometry::Pose,
+            points: Vec<[f64; 2]>,
+        }
+        let map =
+            serde_json::from_slice(&std::fs::read(&args[2])?).map_err(std::io::Error::other)?;
+        let g = components::return_geometry::Geometry::localization(map)
+            .map_err(std::io::Error::other)?;
+        let input: Input =
+            serde_json::from_slice(&std::fs::read(&args[3])?).map_err(std::io::Error::other)?;
+        let mut planner = components::navigation::Navigator::default();
+        let began = std::time::Instant::now();
+        planner.observe(&g, input.pose, 1, &input.points);
+        let command = match planner.command(&g, input.pose, input.goal, 1.) {
+            components::navigation::Command::Moving(v, w) => {
+                serde_json::json!({"linear":v,"angular":w})
+            }
+            components::navigation::Command::Arrived => serde_json::json!({"state":"arrived"}),
+            components::navigation::Command::Waiting => serde_json::json!({"state":"replanning"}),
+        };
+        println!(
+            "{}",
+            serde_json::json!({"command":command,"route":planner.route,"elapsed_ms":began.elapsed().as_millis(),"replans":planner.replans,"diagnostics":planner.diagnostics(&g,input.pose,input.goal),"saved_route":g.route_with_obstacles(input.pose,input.goal,&std::collections::HashSet::new()).map(|p|p.len())})
+        );
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("--mapping-evidence") {
         if args.len() != 4 {
             return Err(std::io::Error::other(

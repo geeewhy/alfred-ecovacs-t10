@@ -149,14 +149,29 @@ impl Geometry {
         map: ReturnMap,
         reflections: super::reflectance::Boundaries,
     ) -> Result<Self, String> {
+        Self::build_with_reflections(map, reflections, true)
+    }
+    pub fn with_navigation_reflections(
+        map: ReturnMap,
+        reflections: super::reflectance::Boundaries,
+    ) -> Result<Self, String> {
+        Self::build_with_reflections(map, reflections, false)
+    }
+    fn build_with_reflections(
+        map: ReturnMap,
+        reflections: super::reflectance::Boundaries,
+        docking: bool,
+    ) -> Result<Self, String> {
         if !reflections.model.map_id.is_empty() && reflections.model.map_id != map.map_id {
             return Err("Reflection/return map mismatch".into());
         }
-        let mut value = Self::new(map)?;
+        let mut value = Self::build(map, docking)?;
         // The compact mask is retained independently of HQ. Add its measured
         // surfaces to routing without changing station coordinates or disk map.
         for p in &reflections.model.cells {
             if let Some(i) = value.index((p[0] as f64 + 0.5) * 0.05, (p[1] as f64 + 0.5) * 0.05) {
+                value.free[i] = false;
+                value.distance[i] = 0;
                 let x = i % value.map.width;
                 let y = i / value.map.width;
                 let radius = (0.21 / value.map.resolution).ceil() as isize;
@@ -436,14 +451,134 @@ impl Geometry {
             theta,
         })
     }
+    #[cfg(test)]
     pub fn route(&self, start: Pose, goal: Pose) -> Result<Vec<Pose>, String> {
+        self.route_with_obstacles(start, goal, &std::collections::HashSet::new())
+    }
+    pub fn obstacle_points(&self, pose: Pose, points: &[[f64; 2]]) -> Vec<[f64; 2]> {
+        let mut filtered = self.reflections.filter(pose, points);
+        filtered.points.extend(filtered.obstacles);
+        filtered.points
+    }
+    pub fn traversable(&self, p: Pose) -> bool {
+        self.index(p.x, p.y).is_some_and(|i| self.walk[i])
+    }
+    pub fn navigation_space(&self, observed: &std::collections::HashSet<usize>) -> Vec<bool> {
+        let mut walk = self.walk.clone();
+        let r = (0.21 / self.map.resolution).ceil() as isize;
+        // Live rays can establish unknown floor, never erase occupied walls.
+        let candidates: std::collections::HashSet<_> = observed
+            .iter()
+            .flat_map(|&i| {
+                neighbors(i, self.map.width, self.map.height)
+                    .into_iter()
+                    .chain(std::iter::once(i))
+            })
+            .collect();
+        for i in candidates {
+            if walk[i] || self.distance[i] == 0 {
+                continue;
+            }
+            let x = (i % self.map.width) as isize;
+            let y = (i / self.map.width) as isize;
+            let mut clear = true;
+            'footprint: for dy in -r..=r {
+                for dx in -r..=r {
+                    if ((dx * dx + dy * dy) as f64) * self.map.resolution.powi(2) > 0.21f64.powi(2)
+                    {
+                        continue;
+                    }
+                    let (xx, yy) = (x + dx, y + dy);
+                    if xx < 0
+                        || yy < 0
+                        || xx >= self.map.width as isize
+                        || yy >= self.map.height as isize
+                    {
+                        clear = false;
+                        break 'footprint;
+                    }
+                    let j = yy as usize * self.map.width + xx as usize;
+                    if self.distance[j] == 0 || (!self.free[j] && !observed.contains(&j)) {
+                        clear = false;
+                        break 'footprint;
+                    }
+                }
+            }
+            walk[i] = clear;
+        }
+        walk
+    }
+    pub fn route_with_obstacles(
+        &self,
+        start: Pose,
+        goal: Pose,
+        blocked: &std::collections::HashSet<usize>,
+    ) -> Result<Vec<Pose>, String> {
+        self.route_in_space(start, goal, &self.walk, blocked)
+    }
+    /// Reach a different observed approach when the destination is temporarily
+    /// disconnected. All cells still obey the same footprint and obstacle mask.
+    pub fn observation_route(
+        &self,
+        start: Pose,
+        goal: Pose,
+        space: &[bool],
+        blocked: &std::collections::HashSet<usize>,
+        visited: &[Pose],
+    ) -> Option<Vec<Pose>> {
+        let allowed = |i: usize| space[i] && !blocked.contains(&i);
+        let begin = self.index(start.x, start.y)?;
+        if !allowed(begin) {
+            return None;
+        }
+        let mut costs = vec![usize::MAX; space.len()];
+        let mut parent = vec![usize::MAX; space.len()];
+        let mut queue = VecDeque::from([begin]);
+        costs[begin] = 0;
+        let mut best = None;
+        while let Some(i) = queue.pop_front() {
+            let p = self.center(i);
+            if p.distance(start) > 0.40 && visited.iter().all(|v| v.distance(p) > 0.50) {
+                let score = p.distance(goal) + 0.15 * costs[i] as f64 * self.map.resolution;
+                if best.is_none_or(|(_, s)| score < s) {
+                    best = Some((i, score));
+                }
+            }
+            for j in neighbors(i, self.map.width, self.map.height) {
+                if allowed(j) && costs[j] == usize::MAX {
+                    costs[j] = costs[i] + 1;
+                    parent[j] = i;
+                    queue.push_back(j);
+                }
+            }
+        }
+        let (mut i, _) = best?;
+        let mut path = vec![self.center(i)];
+        while i != begin {
+            i = parent[i];
+            path.push(self.center(i));
+        }
+        path.reverse();
+        Some(path)
+    }
+    pub fn route_in_space(
+        &self,
+        start: Pose,
+        goal: Pose,
+        space: &[bool],
+        blocked: &std::collections::HashSet<usize>,
+    ) -> Result<Vec<Pose>, String> {
+        let walk: Vec<_> = space
+            .iter()
+            .enumerate()
+            .map(|(i, v)| *v && !blocked.contains(&i))
+            .collect();
         let nearest = |p: Pose| -> Option<usize> {
             let i = self.index(p.x, p.y)?;
-            if self.walk[i] {
+            if walk[i] {
                 return Some(i);
             }
-            self.walk
-                .iter()
+            walk.iter()
                 .enumerate()
                 .filter(|(_, v)| **v)
                 .map(|(j, _)| (j, self.center(j).distance(p)))
@@ -471,7 +606,7 @@ impl Geometry {
                 return Ok(path);
             }
             for j in neighbors(i, self.map.width, self.map.height) {
-                if !self.walk[j] || cost[j] <= cost[i] + 1 {
+                if !walk[j] || cost[j] <= cost[i] + 1 {
                     continue;
                 }
                 cost[j] = cost[i] + 1;

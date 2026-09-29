@@ -1,4 +1,5 @@
 //! Engine-owned return operation. No HTTP client, HQ heartbeat or companion dependency.
+use super::navigation::{Command, Navigator};
 use super::return_geometry::{DockController, Geometry, Pose, ReturnMap, wrap};
 use super::{
     bumpers::BumperTelemetry,
@@ -7,7 +8,12 @@ use super::{
     mapping::NativeMapping,
     power::{BatterySnapshotSource, NativeBatterySnapshot},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+#[derive(Deserialize)]
+pub struct NavigationGoal {
+    pub map_id: String,
+    pub pose: Pose,
+}
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -23,6 +29,8 @@ pub struct ReturnStatus {
     pub pose: Option<Pose>,
     pub score: f64,
     pub retries: u8,
+    pub goal: Option<Pose>,
+    pub replans: u32,
     pub elapsed_ms: u64,
 }
 impl Default for ReturnStatus {
@@ -35,6 +43,8 @@ impl Default for ReturnStatus {
             pose: None,
             score: 0.,
             retries: 0,
+            goal: None,
+            replans: 0,
             elapsed_ms: 0,
         }
     }
@@ -43,7 +53,8 @@ struct Operation {
     status: ReturnStatus,
     started: Instant,
     lost: Option<Instant>,
-    route: Vec<Pose>,
+    navigator: Navigator,
+    detour: bool,
     reseat: bool,
     docking: DockController,
     contact: Option<Instant>,
@@ -63,7 +74,8 @@ impl Default for Operation {
             status: ReturnStatus::default(),
             started: Instant::now(),
             lost: None,
-            route: Vec::new(),
+            navigator: Navigator::default(),
+            detour: false,
             reseat: false,
             docking: DockController::default(),
             contact: None,
@@ -175,13 +187,57 @@ impl ReturnService {
         Ok(())
     }
     pub async fn start(&self) -> Result<(), String> {
-        if self.active().await {
-            return Ok(());
+        self.start_operation(None).await
+    }
+    pub async fn navigate(&self, goal: NavigationGoal) -> Result<(), String> {
+        if [goal.pose.x, goal.pose.y, goal.pose.theta]
+            .iter()
+            .any(|v| !v.is_finite())
+        {
+            return Err("Destination must be finite map coordinates".into());
         }
-        if self.geometry.read().await.is_none() {
+        let map = self
+            .localization
+            .navigation_map()
+            .await
+            .ok_or("Install a navigation map first")?;
+        if map.map_id != goal.map_id {
+            return Err("Destination belongs to a different map".into());
+        }
+        self.start_operation(Some((map, goal.pose))).await
+    }
+    async fn start_operation(&self, destination: Option<(ReturnMap, Pose)>) -> Result<(), String> {
+        if self.active().await {
+            return Err(
+                "A navigation operation is already active; stop it before replacing its goal"
+                    .into(),
+            );
+        }
+        if destination.is_none() && self.geometry.read().await.is_none() {
             return Err("Install a return map first".into());
         }
-        let map = self.geometry.read().await.as_ref().unwrap().map.clone();
+        let goal = destination.as_ref().map(|(_, p)| *p);
+        let map = if let Some((map, _)) = destination {
+            map
+        } else {
+            // Keep saved dock calibration, but route on the latest localization grid.
+            let saved = serde_json::from_slice::<ReturnMap>(
+                &tokio::fs::read(CONFIG).await.map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            if let Some(mut current) = self
+                .localization
+                .navigation_map()
+                .await
+                .filter(|m| m.map_id == saved.map_id)
+            {
+                current.station = saved.station;
+                current.enclosure = saved.enclosure;
+                current
+            } else {
+                saved
+            }
+        };
         let location = self.localization.status().await;
         if location.map_id.as_deref() != Some(&map.map_id) {
             self.localization
@@ -189,10 +245,15 @@ impl ReturnService {
                 .await?;
         }
         let reflections = self.reflectance.load(&map.map_id).await?;
-        *self.geometry.write().await = Some(Arc::new(Geometry::with_reflections(
-            map,
-            (*reflections).clone(),
-        )?));
+        let geometry = if goal.is_some() {
+            Geometry::with_navigation_reflections(map, (*reflections).clone())?
+        } else {
+            Geometry::with_reflections(map, (*reflections).clone())?
+        };
+        if goal.is_some_and(|p| !geometry.traversable(p)) {
+            return Err("Destination does not have room for the robot in the saved map".into());
+        }
+        *self.geometry.write().await = Some(Arc::new(geometry));
         let native = self.mapping.status().await;
         let work = native.reports["/task/WorkState"]["bytes"]
             .as_array()
@@ -204,6 +265,7 @@ impl ReturnService {
         *self.contact.write().await = None;
         let mut op = Operation::default();
         op.status.active = true;
+        op.status.goal = goal;
         op.status.state = "preparing".into();
         op.status.message = "Waking sensors for onboard return".into();
         op.boot = native.boot_id;
@@ -267,7 +329,7 @@ impl ReturnService {
             return;
         };
         let _ = at;
-        if charging {
+        if charging && op.status.goal.is_none() {
             let since = *op.contact.get_or_insert_with(Instant::now);
             let _ = self.drive.stop().await;
             op.status.state = "confirming".into();
@@ -340,34 +402,72 @@ impl ReturnService {
         let pose = op.status.pose.unwrap();
         let station = geometry.map.station;
         let local = station.relative(pose);
-        let (phase, v, w) = if pose.distance(station) > 0.85 || !op.route.is_empty() {
-            if op.route.is_empty() {
-                let staging = Pose {
-                    x: station.x + 0.55 * station.theta.cos(),
-                    y: station.y + 0.55 * station.theta.sin(),
-                    theta: station.theta,
-                };
-                match geometry.route(pose, staging) {
-                    Ok(path) => op.route = path,
-                    Err(e) => {
-                        self.fail(&mut op, &e).await;
-                        return;
+        let Some((scan_pose, points)) = self.localization.navigation_scan(&scan).await else {
+            self.hold(&mut op, "Waiting for scan motion alignment")
+                .await;
+            return;
+        };
+        let points = geometry.obstacle_points(scan_pose, &points);
+        op.navigator
+            .observe(&geometry, scan_pose, scan.sequence, &points);
+        let (phase, v, w) = if op.detour
+            && op.status.goal.is_none()
+            && local.x < 0.42
+            && local.y.abs() < 0.15
+            && local.theta.abs() < 0.4
+        {
+            // Leave the calibrated tight enclosure before asking the room
+            // planner for full-footprint clearance. Forward guard still applies.
+            ("clearing-entry", 0.10, 0.)
+        } else if op.status.goal.is_some()
+            || pose.distance(station) > 0.85
+            || op.detour
+            || !op.navigator.route.is_empty()
+        {
+            let target = op.status.goal.unwrap_or(Pose {
+                x: station.x + 0.55 * station.theta.cos(),
+                y: station.y + 0.55 * station.theta.sin(),
+                theta: station.theta,
+            });
+            let now = op.started.elapsed().as_secs_f64();
+            let command = op.navigator.command(&geometry, pose, target, now);
+            op.status.replans = op.navigator.replans;
+            match command {
+                Command::Moving(v, w) => (
+                    if op.navigator.recovering() {
+                        "checking-approach"
+                    } else {
+                        "navigating"
+                    },
+                    v,
+                    w,
+                ),
+                Command::Waiting => {
+                    op.status.state = "replanning".into();
+                    op.status.message =
+                        "Searching for a clear route; watching for obstacles to move".into();
+                    op.progress = None;
+                    op.lost = None;
+                    let _ = self.drive.stop().await;
+                    return;
+                }
+                Command::Arrived => {
+                    op.detour = false;
+                    if op.status.goal.is_some() {
+                        let heading = wrap(target.theta - pose.theta);
+                        if heading.abs() > 0.15 {
+                            ("goal-alignment", 0., (heading * 1.5).clamp(-0.6, 0.6))
+                        } else {
+                            op.status.active = false;
+                            op.status.state = "arrived".into();
+                            op.status.message = "Destination reached".into();
+                            let _ = self.drive.stop().await;
+                            return;
+                        }
+                    } else {
+                        op.docking.command(station, pose, false)
                     }
                 }
-            }
-            while op.route.first().is_some_and(|p| p.distance(pose) < 0.12) {
-                op.route.remove(0);
-            }
-            if let Some(target) = op.route.first() {
-                let delta = pose.relative(*target);
-                let a = delta.y.atan2(delta.x);
-                (
-                    "approaching",
-                    if a.abs() < 0.3 { 0.15 } else { 0. },
-                    (a * 1.5).clamp(-0.6, 0.6),
-                )
-            } else {
-                op.docking.command(station, pose, false)
             }
         } else {
             if local.x < -0.035 && !op.reseat {
@@ -395,15 +495,26 @@ impl ReturnService {
                 op.docking.command(station, pose, reseat)
             }
         };
-        if obstructed(&scan, &geometry, pose, v, w) {
-            self.hold(&mut op, "Return path obstructed").await;
+        if obstruction(&scan, &geometry, pose, v, w, op.status.goal.is_none()) {
+            op.navigator.invalidate();
+            op.detour = true;
+            op.progress = None;
+            op.lost = None;
+            op.status.state = "replanning".into();
+            op.status.message = "Obstacle detected; finding another trajectory".into();
+            let _ = self.drive.stop().await;
             return;
         }
         if let Some((at, p)) = op.progress {
             if pose.distance(p) > 0.015 || wrap(pose.theta - p.theta).abs() > 0.06 {
                 op.progress = Some((Instant::now(), pose))
             } else if at.elapsed() > Duration::from_secs(10) {
-                self.fail(&mut op, "No measured return progress").await;
+                op.navigator.invalidate();
+                op.detour = true;
+                op.progress = None;
+                op.status.state = "replanning".into();
+                op.status.message = "Progress stalled; replanning approach".into();
+                let _ = self.drive.stop().await;
                 return;
             }
         } else {
@@ -417,6 +528,9 @@ impl ReturnService {
         }
         op.status.state = phase.into();
         op.status.message = match phase {
+            "navigating" => "Following route around observed obstacles",
+            "checking-approach" => "Moving to another clear approach to reassess the route",
+            "goal-alignment" => "Aligning at destination",
             "entering" => "Backing into station",
             "rear-alignment" => "Aligning rear with station",
             "staging" => "Positioning in front of station",
@@ -439,7 +553,11 @@ impl ReturnService {
         }
     }
 }
+#[cfg(test)]
 fn obstructed(scan: &LidarScan, g: &Geometry, pose: Pose, v: f64, w: f64) -> bool {
+    obstruction(scan, g, pose, v, w, true)
+}
+fn obstruction(scan: &LidarScan, g: &Geometry, pose: Pose, v: f64, w: f64, docking: bool) -> bool {
     let station = g.map.station;
     let local = station.relative(pose);
     let mut hits = 0;
@@ -467,7 +585,8 @@ fn obstructed(scan: &LidarScan, g: &Geometry, pose: Pose, v: f64, w: f64) -> boo
             {
                 continue;
             }
-            if v < 0.
+            if docking
+                && v < 0.
                 && local.x < 0.30
                 && g.map.enclosure.iter().any(|q| {
                     (target.x + c * q[0] - s * q[1] - x).hypot(target.y + s * q[0] + c * q[1] - y)

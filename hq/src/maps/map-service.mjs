@@ -262,10 +262,23 @@ export class MapService {
   summary() {
     return this.active ? { id: this.active.id, ...this.active.status } : null;
   }
+  async navigateTo(id,pose) {
+    if(!pose || !["x","y","theta"].every(k=>Number.isFinite(pose[k])))throw Error("Choose a finite map destination and heading");
+    const intent=++this.epoch;
+    const map=await this.load(id),grid=map.checkpoint?.nativeGrid;
+    if(!grid?.cells?.length)throw Error("A saved map is required");
+    if(this.epoch!==intent)throw Error("Navigation preparation cancelled");
+    await this.pauseActive();
+    const epoch=this.epoch;
+    await this.engine.localization("map",{map_id:id,revision:`hq-${map.revision}`,grid});
+    if(this.epoch!==epoch)throw Error("Navigation preparation cancelled");
+    await this.engine.navigate("start",{map_id:id,pose});
+    return this.engine.navigate();
+  }
   async returnOnboard(id) {
     const intent=++this.epoch;
     const running=await this.engine.onboardReturn();
-    if(running.active){if(running.map_id!==id)throw Error("Engine is returning on another map");return running;}
+    if(running.active){if(running.goal)throw Error("Stop point navigation before starting return");if(running.map_id!==id)throw Error("Engine is returning on another map");return running;}
     const map=await this.load(id),grid=map.checkpoint?.nativeGrid;
     if(map.station?.source!=="docked-robot-pose" || !grid?.cells?.length)throw Error("A saved map and verified station are required");
     const enclosure=JSON.parse(await readFile(new URL("../../../mapping/calibration/dock-enclosure.json",import.meta.url),"utf8")).points;

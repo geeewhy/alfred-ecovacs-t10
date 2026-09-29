@@ -12,6 +12,14 @@ export class EngineClient {
     return value.result;
   }
 
+  async navigate(action="status",body) {
+    const path=action==="stop"?"/v1/navigation/stop":"/v1/navigation";
+    const response=await this.request(path,8000,{method:action==="status"?"GET":"POST",headers:{"content-type":"application/json"},...(body?{body:JSON.stringify(body)}:{})});
+    const value=await response.json();
+    if(!response.ok || !value.ok)throw Error(value.result||"Engine navigation unavailable");
+    return value.result;
+  }
+
   async onboardReturn(action="status", body) {
     const path=action==="config"?"/v1/return/config":action==="stop"?"/v1/return/stop":"/v1/return";
     const response=await this.request(path,8000,{method:action==="status"?"GET":action==="config"?"PUT":"POST",headers:{"content-type":"application/json"},...(body?{body:JSON.stringify(body)}:{})});

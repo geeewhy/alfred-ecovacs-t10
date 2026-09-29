@@ -23,3 +23,9 @@ test('engine position works without navigation; stale or wrong map never falls b
  assert.equal(livePosition('primary',null,null,engine).pose.x,1);
  for(const value of [null,{...engine,map_id:'other'},{...engine,age_ms:1800},{...engine,state:'locating'}])assert.equal(livePosition('primary',null,nav,value).pose,null);
 });
+test('native navigation and replanning retain a verified map marker',()=>{
+ for(const state of ['navigating','replanning','goal-alignment']) {
+  const p=livePosition('primary',{active:true,map_id:'primary',state,pose:{x:2,y:3,theta:0},message:'Finding another trajectory'},null);
+  assert.equal(p.pose.x,2);
+ }
+});

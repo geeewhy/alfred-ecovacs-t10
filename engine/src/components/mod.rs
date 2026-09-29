@@ -18,3 +18,5 @@ pub mod map_evidence;
 
 pub mod localization;
 pub mod scan_matcher;
+
+pub mod navigation;
