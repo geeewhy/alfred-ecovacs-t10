@@ -508,6 +508,80 @@ impl Geometry {
         }
         walk
     }
+    /// Recover a robot already inside the planning margin. Open only a short
+    /// outward corridor to normal clearance, never occupied/unknown body space.
+    pub fn margin_escape(
+        &self,
+        start: Pose,
+        space: &mut [bool],
+        blocked: &std::collections::HashSet<usize>,
+    ) -> bool {
+        let Some(begin) = self.index(start.x, start.y) else {
+            return false;
+        };
+        if space[begin] {
+            return true;
+        }
+        let clearance = |i: usize| {
+            let p = self.center(i);
+            let mut closest = f64::INFINITY;
+            let n = (0.5 / self.map.resolution).ceil() as isize;
+            let x = (i % self.map.width) as isize;
+            let y = (i / self.map.width) as isize;
+            for dy in -n..=n {
+                for dx in -n..=n {
+                    let (xx, yy) = (x + dx, y + dy);
+                    let d = (dx as f64).hypot(dy as f64) * self.map.resolution;
+                    if xx < 0
+                        || yy < 0
+                        || xx >= self.map.width as isize
+                        || yy >= self.map.height as isize
+                    {
+                        closest = closest.min(d);
+                        continue;
+                    }
+                    let j = yy as usize * self.map.width + xx as usize;
+                    if !self.free[j] || self.distance[j] == 0 {
+                        closest = closest.min(p.distance(self.center(j)));
+                    }
+                }
+            }
+            closest
+        };
+        let initial = clearance(begin);
+        if initial < 0.19 || blocked.contains(&begin) {
+            return false;
+        }
+        let mut queue = VecDeque::from([(begin, initial)]);
+        let mut parent = vec![usize::MAX; space.len()];
+        parent[begin] = begin;
+        while let Some((i, previous)) = queue.pop_front() {
+            if space[i] {
+                let mut at = i;
+                space[at] = true;
+                while at != begin {
+                    at = parent[at];
+                    space[at] = true;
+                }
+                return true;
+            }
+            for j in neighbors(i, self.map.width, self.map.height) {
+                if parent[j] != usize::MAX
+                    || blocked.contains(&j)
+                    || self.center(j).distance(start) > 0.4
+                {
+                    continue;
+                }
+                let next = clearance(j);
+                if next + 1e-9 < previous || next < 0.19 {
+                    continue;
+                }
+                parent[j] = i;
+                queue.push_back((j, next));
+            }
+        }
+        false
+    }
     pub fn route_with_obstacles(
         &self,
         start: Pose,

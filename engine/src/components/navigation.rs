@@ -129,6 +129,7 @@ impl Navigator {
             self.walk = g.navigation_space(&self.observed_free);
         }
         let blocked = self.inflated(g);
+        g.margin_escape(pose, &mut self.walk, &blocked);
         let invalid = self
             .route
             .iter()
@@ -299,6 +300,59 @@ mod tests {
             enclosure: vec![],
         })
         .unwrap()
+    }
+    #[test]
+    fn leaves_saved_margin_and_completes_trip() {
+        let g = room();
+        let mut nav = Navigator::default();
+        let mut p = Pose {
+            x: 0.225,
+            y: 2.525,
+            theta: -std::f64::consts::FRAC_PI_2,
+        };
+        let goal = Pose {
+            x: 2.,
+            y: 2.5,
+            theta: 0.,
+        };
+        assert!(!g.traversable(p));
+        let mut arrived = false;
+        for tick in 0..1000 {
+            // A visible wall is outside the real body but inside the saved margin.
+            let wall = p.relative(Pose {
+                x: -0.1,
+                y: p.y,
+                theta: 0.,
+            });
+            nav.observe(&g, p, tick, &[[wall.x, wall.y]]);
+            match nav.command(&g, p, goal, tick as f64 * 0.05) {
+                Command::Moving(v, w) => {
+                    p.advance((v - w * 0.243 / 2.) * 0.05, (v + w * 0.243 / 2.) * 0.05)
+                }
+                Command::Arrived => {
+                    arrived = true;
+                    break;
+                }
+                Command::Waiting => {}
+            }
+            assert!(p.x >= 0.225 - 1e-6, "must not move toward the saved wall");
+        }
+        assert!(arrived, "margin escape must lead to normal navigation");
+    }
+    #[test]
+    fn margin_escape_cannot_open_body_collision_or_live_obstacle() {
+        let g = room();
+        let mut space = g.navigation_space(&HashSet::new());
+        let p = Pose {
+            x: 0.175,
+            y: 2.525,
+            theta: 0.,
+        };
+        assert!(!g.margin_escape(p, &mut space, &HashSet::new()));
+        let p = Pose { x: 0.225, ..p };
+        let blocked = HashSet::from([g.index(p.x, p.y).unwrap()]);
+        assert!(!g.margin_escape(p, &mut space, &blocked));
+        assert!(!space[g.index(p.x, p.y).unwrap()]);
     }
     fn chair(pose: Pose) -> Vec<[f64; 2]> {
         (0..60)

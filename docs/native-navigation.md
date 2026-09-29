@@ -24,3 +24,28 @@ Coordinates and heading are metres/radians in the installed map. Generic goals r
 Trajectory sampling is inspired by the [dynamic-window approach](https://publications.ri.cmu.edu/the-dynamic-window-approach-to-collision-avoidance); measured marking and clearing follow the established [obstacle-layer pattern](https://docs.nav2.org/jazzy/configuration_and_development/configuration_guide/core_servers/costmap_2d/costmap_plugins/obstacle/). This implementation does not yet model calibrated acceleration/braking limits. Maximum planned forward speed is 0.22 m/s. Physical validation remains user-triggered; mirror-model repair is a separate unfinished task.
 
 Deployed binary MD5: `cf979783bf30e1595cef44b37fba029a`. On-device recorded replay took 87 ms for initial scan processing and planning, producing a 27-point alternate approach. This exceeds one 50 ms controller period; it is an initial planning measurement, not a sustained-loop timing guarantee. Authenticated health and navigation status passed after deployment, with navigation idle. Station coordinates were verified unchanged. Recovery binary: `/data/alfred/alfred-engine.before-navigation-replanning`.
+
+## Starting inside the planning margin (2026-09-29)
+
+A recorded stationary return reached 529 replans and the 300-second deadline
+while localization remained located (~98.7% agreement). Replay reproduced an
+empty route: the starting grid cell was within 21 cm of saved occupied cells;
+the nearest live return was ~28.4 cm. The alternate-viewpoint search required an
+already traversable start and therefore never searched the reachable clearing.
+
+The shared engine planner now admits a short outward corridor from an initial
+planning-margin overlap to normal clearance. It retains at least 19 cm centre-to-
+saved-cell clearance, includes unknown cells in the clearance test, never moves
+through the live inflated mask, never decreases saved clearance along the grid
+corridor, and limits escape search to 40 cm. Normal trajectory checks and contact/
+cliff guards remain. This does not erase saved walls or relax the entire map.
+
+63 Rust tests pass, including a complete simulated trip from the margin and
+rejection of body/live-obstacle overlap. Actual device map + captured scan replay
+now yields an 11-point alternate approach (60 ms on device), starting with a turn.
+Evidence: `artifacts/hq/navigation-stall/`. Deployed MD5
+`7a8b06e833092c659184d50701b5a26a`; rollback binary
+`/data/alfred/alfred-engine.before-margin-escape`. Health and automatic localization
+verified after restart; return idle. Physical escape/return remains user-triggered
+and unverified. This fixes the reproduced return stall, not an active-localization
+maneuver: ordinary Locate still estimates position without driving.
