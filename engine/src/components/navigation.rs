@@ -1,12 +1,16 @@
 //! Shared native point-to-point navigation: live obstacle memory, A* rerouting,
 //! and footprint-checked differential-drive trajectory rollout. No HQ heartbeat.
 use super::return_geometry::{Geometry, Pose};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 pub struct Navigator {
     obstacles: HashSet<usize>,
     observed_free: HashSet<usize>,
+    free_evidence: HashMap<usize, (u8, u64)>,
+    observation: u64,
+    cleared: HashSet<usize>,
+    costs: Vec<u16>,
     walk: Vec<bool>,
     pub route: Vec<Pose>,
     pub replans: u32,
@@ -23,6 +27,9 @@ pub enum Command {
     Waiting,
 }
 impl Navigator {
+    pub fn summary(&self) -> serde_json::Value {
+        serde_json::json!({"route_points":self.route.len(),"recovery_target":self.recovery_target,"viewpoints_checked":self.visited.len(),"confirmed_free_cells":self.cleared.len(),"obstacles":self.obstacles.len()})
+    }
     pub fn recovering(&self) -> bool {
         self.recovery_target.is_some()
     }
@@ -35,6 +42,7 @@ impl Navigator {
             return;
         }
         self.last_scan = Some(sequence);
+        self.observation += 1;
         let (s, c) = pose.theta.sin_cos();
         let mut hits = HashSet::new();
         let mut clear = HashSet::new();
@@ -51,7 +59,7 @@ impl Navigator {
             let steps = (end / (g.map.resolution * 0.5)).ceil() as usize;
             for j in 0..steps {
                 let t = j as f64 * (g.map.resolution * 0.5);
-                if t >= d - 0.10 {
+                if t >= d - g.map.resolution * 0.5 {
                     break;
                 }
                 if let Some(i) = g.index(pose.x + dx * t / d, pose.y + dy * t / d) {
@@ -69,8 +77,46 @@ impl Navigator {
         for i in &hits {
             self.observed_free.remove(i);
         }
+        // A single ray/scan cannot overrule the saved map. Fresh repeated free
+        // observations can, in this operation's navigation layer only. Endpoint
+        // marks win and an occluded/stale cell falls back to the saved map.
+        self.free_evidence
+            .retain(|i, (_, at)| self.observation - *at <= 5 && !hits.contains(i));
+        for &i in &clear {
+            if hits.contains(&i) {
+                continue;
+            }
+            let entry = self.free_evidence.entry(i).or_insert((0, self.observation));
+            entry.0 = entry.0.saturating_add(1).min(3);
+            entry.1 = self.observation;
+        }
+        self.cleared = self
+            .free_evidence
+            .iter()
+            .filter(|(_, (n, _))| *n >= 3)
+            .map(|(&i, _)| i)
+            .collect();
         self.obstacles.extend(hits);
-        self.walk = g.navigation_space(&self.observed_free);
+        self.costs = vec![0; g.map.width * g.map.height];
+        let n = (0.35 / g.map.resolution).ceil() as i32;
+        for &i in &self.obstacles {
+            let p = Self::center(g, i);
+            for dx in -n..=n {
+                for dy in -n..=n {
+                    let d = (dx as f64).hypot(dy as f64) * g.map.resolution;
+                    if d >= 0.35 {
+                        continue;
+                    }
+                    if let Some(j) = g.index(
+                        p.x + dx as f64 * g.map.resolution,
+                        p.y + dy as f64 * g.map.resolution,
+                    ) {
+                        self.costs[j] = self.costs[j].max(((0.35 - d) * 200.) as u16);
+                    }
+                }
+            }
+        }
+        self.walk = g.navigation_space_with_clearing(&self.observed_free, &self.cleared);
     }
     fn center(g: &Geometry, i: usize) -> Pose {
         Pose {
@@ -85,7 +131,7 @@ impl Navigator {
     }
     fn inflated(&self, g: &Geometry) -> HashSet<usize> {
         let mut blocked = HashSet::new();
-        let radius = 0.23; // body + measurement/grid uncertainty
+        let radius = 0.18; // body footprint; extra clearance is a cost, not a wall
         let n = (radius / g.map.resolution).ceil() as i32;
         for &i in &self.obstacles {
             let p = Self::center(g, i);
@@ -114,7 +160,7 @@ impl Navigator {
             .filter(|p| g.index(p.x, p.y).is_some_and(|i| blocked.contains(&i)))
             .collect();
         serde_json::json!({"obstacles":self.obstacles.iter().map(|&i|Self::center(g,i)).collect::<Vec<_>>(),
-            "conflicts":conflicts,"recovery_target":self.recovery_target,"viewpoints_checked":self.visited.len(),"route_error":g.route_in_space(pose,goal,&self.walk,&blocked).err()})
+            "conflicts":conflicts,"recovery_target":self.recovery_target,"viewpoints_checked":self.visited.len(),"confirmed_free_cells":self.cleared.len(),"route_error":g.route_in_space(pose,goal,&self.walk,&blocked).err()})
     }
     pub fn command(&mut self, g: &Geometry, pose: Pose, goal: Pose, now: f64) -> Command {
         if pose.distance(goal) < 0.10 {
@@ -141,7 +187,7 @@ impl Navigator {
             self.planned_at = now;
             self.replans += 1;
             self.route = g
-                .route_in_space(pose, goal, &self.walk, &blocked)
+                .route_with_costs(pose, goal, &self.walk, &blocked, &self.costs)
                 .unwrap_or_default();
             if self.route.is_empty() {
                 if self
@@ -152,16 +198,23 @@ impl Navigator {
                 }
                 if let Some(target) = self.recovery_target {
                     self.route = g
-                        .route_in_space(pose, target, &self.walk, &blocked)
+                        .route_with_costs(pose, target, &self.walk, &blocked, &self.costs)
                         .unwrap_or_default();
                     if self.route.is_empty() {
                         self.visited.push(target);
                         self.recovery_target = None;
                     }
                 }
-                if self.route.is_empty() && self.visited.len() < 4 {
+                if self.route.is_empty() {
                     self.route = g
-                        .observation_route(pose, goal, &self.walk, &blocked, &self.visited)
+                        .observation_route(
+                            pose,
+                            goal,
+                            &self.walk,
+                            &blocked,
+                            &self.visited,
+                            &self.observed_free,
+                        )
                         .unwrap_or_default();
                     self.recovery_target = self.route.last().copied();
                 }
@@ -203,13 +256,25 @@ impl Navigator {
                 }
             }
         }
+        let current_clearance = obstacles
+            .iter()
+            .map(|p| p.distance(pose))
+            .fold(f64::INFINITY, f64::min);
         let mut best = None;
         for (v, w) in candidates {
+            if current_clearance < 0.28 && v > 0.10 {
+                continue;
+            }
             let Some(end) = rollout_in_space(g, pose, v, w, &obstacles, Some(&self.walk)) else {
                 continue;
             };
             let rel = end.relative(target);
+            let clearance = obstacles
+                .iter()
+                .map(|p| p.distance(end))
+                .fold(f64::INFINITY, f64::min);
             let score = -end.distance(target)
+                - 2.0 * (0.28 - clearance).max(0.)
                 - (if pose.distance(target) > 0.25 {
                     0.08
                 } else {
@@ -263,7 +328,7 @@ fn rollout_in_space(
             .iter()
             .map(|p| p.distance(pose))
             .fold(f64::INFINITY, f64::min);
-        if clearance < 0.23 && (initial >= 0.23 || clearance < initial + 0.002 || v == 0.) {
+        if clearance < 0.18 && (initial >= 0.18 || clearance < initial + 0.002 || v == 0.) {
             return None;
         }
     }
@@ -315,7 +380,6 @@ mod tests {
             y: 2.5,
             theta: 0.,
         };
-        assert!(!g.traversable(p));
         let mut arrived = false;
         for tick in 0..1000 {
             // A visible wall is outside the real body but inside the saved margin.
@@ -349,10 +413,78 @@ mod tests {
             theta: 0.,
         };
         assert!(!g.margin_escape(p, &mut space, &HashSet::new()));
-        let p = Pose { x: 0.225, ..p };
+        let p = Pose { x: 0.175, ..p };
         let blocked = HashSet::from([g.index(p.x, p.y).unwrap()]);
         assert!(!g.margin_escape(p, &mut space, &blocked));
         assert!(!space[g.index(p.x, p.y).unwrap()]);
+    }
+    #[test]
+    fn narrow_doorway_is_traversable_without_disabling_footprint_checks() {
+        let mut map = room().map;
+        for cell in &mut map.cells {
+            if cell[0] == 60 && !(40..=47).contains(&cell[1]) {
+                cell[2] = 129;
+            }
+        }
+        let g = Geometry::localization(map).unwrap();
+        let mut n = Navigator::default();
+        let mut p = Pose {
+            x: 1.5,
+            y: 2.2,
+            theta: 0.,
+        };
+        let goal = Pose {
+            x: 4.5,
+            y: 2.2,
+            theta: 0.,
+        };
+        let mut arrived = false;
+        for t in 0..1000 {
+            let points: Vec<_> = (1..99)
+                .filter(|y| !(40..=47).contains(y))
+                .map(|y| {
+                    let q = p.relative(Pose {
+                        x: 3.025,
+                        y: y as f64 * 0.05 + 0.025,
+                        theta: 0.,
+                    });
+                    [q.x, q.y]
+                })
+                .collect();
+            n.observe(&g, p, t, &points);
+            match n.command(&g, p, goal, t as f64 * 0.1) {
+                Command::Moving(v, w) => {
+                    p.advance((v - w * 0.243 / 2.) * 0.1, (v + w * 0.243 / 2.) * 0.1)
+                }
+                Command::Arrived => {
+                    arrived = true;
+                    break;
+                }
+                Command::Waiting => {}
+            }
+            assert!(points.iter().all(|q| q[0].hypot(q[1]) >= 0.18));
+        }
+        assert!(arrived, "narrow doorway stalled at {p:?}");
+    }
+    #[test]
+    fn clearing_requires_distinct_scans_and_a_new_hit_revokes_it() {
+        let g = room();
+        let mut n = Navigator::default();
+        let p = Pose {
+            x: 1.,
+            y: 2.,
+            theta: 0.,
+        };
+        let i = g.index(2., 2.).unwrap();
+        n.observe(&g, p, 1, &[[2., 0.]]);
+        n.observe(&g, p, 1, &[[2., 0.]]);
+        assert!(!n.cleared.contains(&i));
+        n.observe(&g, p, 2, &[[2., 0.]]);
+        assert!(!n.cleared.contains(&i));
+        n.observe(&g, p, 3, &[[2., 0.]]);
+        assert!(n.cleared.contains(&i));
+        n.observe(&g, p, 4, &[[1., 0.]]);
+        assert!(!n.cleared.contains(&i));
     }
     fn chair(pose: Pose) -> Vec<[f64; 2]> {
         (0..60)
@@ -383,7 +515,7 @@ mod tests {
         };
         let mut detour: f64 = 0.;
         let mut arrived = false;
-        for i in 0..1800 {
+        for i in 0..500 {
             nav.observe(&g, p, i, &chair(p));
             match nav.command(&g, p, goal, i as f64 * 0.1) {
                 Command::Moving(v, w) => {
@@ -560,7 +692,7 @@ mod tests {
         );
     }
     #[test]
-    fn fully_blocked_goal_checks_bounded_approaches_then_waits() {
+    fn fully_blocked_goal_explores_without_crossing_wall() {
         let g = room();
         let mut n = Navigator::default();
         let mut p = Pose {
@@ -582,7 +714,7 @@ mod tests {
             .collect();
         let mut moved = false;
         let mut waiting = false;
-        for i in 0..1800 {
+        for i in 0..500 {
             let points: Vec<_> = wall
                 .iter()
                 .map(|q| {
@@ -597,7 +729,7 @@ mod tests {
                     moved |= v.abs() > 0.;
                 }
                 Command::Waiting => {
-                    if n.visited.len() >= 4 {
+                    if n.visited.len() >= 1 && n.recovery_target.is_none() {
                         waiting = true;
                         break;
                     }
@@ -607,11 +739,10 @@ mod tests {
             assert!(p.x < 2.80);
         }
         assert!(moved);
-        assert!(
-            waiting,
-            "unbounded approach cycling {} {p:?}",
-            n.visited.len()
-        );
+        assert!(waiting || n.recovering());
+        for (i, a) in n.visited.iter().enumerate() {
+            assert!(n.visited[..i].iter().all(|b| a.distance(*b) > 0.49));
+        }
     }
     #[test]
     fn curved_trajectory_cannot_cut_through_an_obstacle() {

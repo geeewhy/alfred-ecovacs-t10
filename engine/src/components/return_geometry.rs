@@ -49,6 +49,7 @@ pub struct Geometry {
     reflections: super::reflectance::Boundaries,
     pub map: ReturnMap,
     free: Vec<bool>,
+    protected: std::collections::HashSet<usize>,
     distance: Vec<u16>,
     walk: Vec<bool>,
 }
@@ -110,7 +111,7 @@ impl Geometry {
                 }
             }
         }
-        let radius = (0.21 / map.resolution).ceil() as isize;
+        let radius = (0.18 / map.resolution).ceil() as isize;
         let mut walk = free.clone();
         for (i, allowed) in walk.iter_mut().enumerate() {
             if !*allowed {
@@ -120,7 +121,7 @@ impl Geometry {
             let y = (i / map.width) as isize;
             'footprint: for dy in -radius..=radius {
                 for dx in -radius..=radius {
-                    if (dx * dx + dy * dy) as f64 * map.resolution.powi(2) > 0.21f64.powi(2) {
+                    if (dx * dx + dy * dy) as f64 * map.resolution.powi(2) > 0.18f64.powi(2) {
                         continue;
                     }
                     let xx = x + dx;
@@ -141,6 +142,7 @@ impl Geometry {
             reflections: Default::default(),
             map,
             free,
+            protected: Default::default(),
             distance,
             walk,
         })
@@ -170,11 +172,12 @@ impl Geometry {
         // surfaces to routing without changing station coordinates or disk map.
         for p in &reflections.model.cells {
             if let Some(i) = value.index((p[0] as f64 + 0.5) * 0.05, (p[1] as f64 + 0.5) * 0.05) {
+                value.protected.insert(i);
                 value.free[i] = false;
                 value.distance[i] = 0;
                 let x = i % value.map.width;
                 let y = i / value.map.width;
-                let radius = (0.21 / value.map.resolution).ceil() as isize;
+                let radius = (0.18 / value.map.resolution).ceil() as isize;
                 for dx in -radius..=radius {
                     for dy in -radius..=radius {
                         let xx = x as isize + dx;
@@ -464,9 +467,17 @@ impl Geometry {
         self.index(p.x, p.y).is_some_and(|i| self.walk[i])
     }
     pub fn navigation_space(&self, observed: &std::collections::HashSet<usize>) -> Vec<bool> {
+        self.navigation_space_with_clearing(observed, &Default::default())
+    }
+    pub fn navigation_space_with_clearing(
+        &self,
+        observed: &std::collections::HashSet<usize>,
+        cleared: &std::collections::HashSet<usize>,
+    ) -> Vec<bool> {
         let mut walk = self.walk.clone();
-        let r = (0.21 / self.map.resolution).ceil() as isize;
-        // Live rays can establish unknown floor, never erase occupied walls.
+        let r = (0.18 / self.map.resolution).ceil() as isize;
+        // Live rays establish unknown floor; confirmed clearing changes only this
+        // temporary navigation layer, never the stored localization map.
         let candidates: std::collections::HashSet<_> = observed
             .iter()
             .flat_map(|&i| {
@@ -476,7 +487,10 @@ impl Geometry {
             })
             .collect();
         for i in candidates {
-            if walk[i] || self.distance[i] == 0 {
+            if walk[i]
+                || (self.distance[i] == 0 && !cleared.contains(&i))
+                || self.protected.contains(&i)
+            {
                 continue;
             }
             let x = (i % self.map.width) as isize;
@@ -484,7 +498,7 @@ impl Geometry {
             let mut clear = true;
             'footprint: for dy in -r..=r {
                 for dx in -r..=r {
-                    if ((dx * dx + dy * dy) as f64) * self.map.resolution.powi(2) > 0.21f64.powi(2)
+                    if ((dx * dx + dy * dy) as f64) * self.map.resolution.powi(2) > 0.18f64.powi(2)
                     {
                         continue;
                     }
@@ -498,7 +512,10 @@ impl Geometry {
                         break 'footprint;
                     }
                     let j = yy as usize * self.map.width + xx as usize;
-                    if self.distance[j] == 0 || (!self.free[j] && !observed.contains(&j)) {
+                    if self.protected.contains(&j)
+                        || (self.distance[j] == 0 && !cleared.contains(&j))
+                        || (!self.free[j] && !observed.contains(&j))
+                    {
                         clear = false;
                         break 'footprint;
                     }
@@ -599,6 +616,7 @@ impl Geometry {
         space: &[bool],
         blocked: &std::collections::HashSet<usize>,
         visited: &[Pose],
+        observed: &std::collections::HashSet<usize>,
     ) -> Option<Vec<Pose>> {
         let allowed = |i: usize| space[i] && !blocked.contains(&i);
         let begin = self.index(start.x, start.y)?;
@@ -612,10 +630,40 @@ impl Geometry {
         let mut best = None;
         while let Some(i) = queue.pop_front() {
             let p = self.center(i);
-            if p.distance(start) > 0.40 && visited.iter().all(|v| v.distance(p) > 0.50) {
-                let score = p.distance(goal) + 0.15 * costs[i] as f64 * self.map.resolution;
-                if best.is_none_or(|(_, s)| score < s) {
-                    best = Some((i, score));
+            if i % self.map.width % 4 == 0
+                && i / self.map.width % 4 == 0
+                && p.distance(start) > 0.40
+                && visited.iter().all(|v| v.distance(p) > 0.50)
+            {
+                // Expected new visibility, not just proximity to a blocked goal.
+                // Ray casting respects saved/current obstacles and reflection masks.
+                let mut gain = std::collections::HashSet::new();
+                for beam in 0..48 {
+                    let angle = beam as f64 * std::f64::consts::TAU / 48.;
+                    for step in 1..=20 {
+                        let d = step as f64 * 0.075;
+                        let Some(j) = self.index(p.x + d * angle.cos(), p.y + d * angle.sin())
+                        else {
+                            break;
+                        };
+                        if self.protected.contains(&j)
+                            || (self.distance[j] == 0 && !observed.contains(&j))
+                            || blocked.contains(&j)
+                        {
+                            break;
+                        }
+                        if !observed.contains(&j) {
+                            gain.insert(j);
+                        }
+                    }
+                }
+                if gain.len() >= 12 {
+                    let score = 0.4 * p.distance(goal)
+                        + 0.2 * costs[i] as f64 * self.map.resolution
+                        - 0.012 * gain.len() as f64;
+                    if best.is_none_or(|(_, s)| score < s) {
+                        best = Some((i, score));
+                    }
                 }
             }
             for j in neighbors(i, self.map.width, self.map.height) {
@@ -641,6 +689,16 @@ impl Geometry {
         goal: Pose,
         space: &[bool],
         blocked: &std::collections::HashSet<usize>,
+    ) -> Result<Vec<Pose>, String> {
+        self.route_with_costs(start, goal, space, blocked, &[])
+    }
+    pub fn route_with_costs(
+        &self,
+        start: Pose,
+        goal: Pose,
+        space: &[bool],
+        blocked: &std::collections::HashSet<usize>,
+        extra: &[u16],
     ) -> Result<Vec<Pose>, String> {
         let walk: Vec<_> = space
             .iter()
@@ -680,14 +738,22 @@ impl Geometry {
                 return Ok(path);
             }
             for j in neighbors(i, self.map.width, self.map.height) {
-                if !walk[j] || cost[j] <= cost[i] + 1 {
+                let next = cost[i]
+                    + 10
+                    + extra.get(j).copied().unwrap_or(0) as usize
+                    + if self.distance[j] < 6 {
+                        (6 - self.distance[j]) as usize * 4
+                    } else {
+                        0
+                    };
+                if !walk[j] || cost[j] <= next {
                     continue;
                 }
-                cost[j] = cost[i] + 1;
+                cost[j] = next;
                 parent[j] = i;
                 let h = (j % self.map.width).abs_diff(goal % self.map.width)
                     + (j / self.map.width).abs_diff(goal / self.map.width);
-                open.push(Reverse((cost[j] + h, j)))
+                open.push(Reverse((cost[j] + 10 * h, j)))
             }
         }
         Err("No collision-free route to station in saved map".into())

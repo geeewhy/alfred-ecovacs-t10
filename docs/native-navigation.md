@@ -1,5 +1,7 @@
 # Native point navigation and obstacle recovery
 
+**Current behavior and verified physical result:** see [navigation recovery](navigation-recovery.md). The September 29 update replaces the hard comfort margin and four-viewpoint cutoff described in the historical notes below.
+
 Return-to-station and arbitrary map goals share the Rust Navigator and the existing motor ownership gate. HQ prepares the map and starts an operation; it does not stream navigation commands.
 
 The planner overlays measured LiDAR endpoints on the saved grid, inflates obstacles for the robot footprint, replans A* routes, and scores differential-drive trajectories over a 1.5 second horizon. Scan points are deskewed and transformed using the acquisition pose. Measured free rays clear remembered endpoints; elapsed time or turning away does not. Observed free floor can fill unknown cells, but cannot erase saved occupied cells or installed reflection boundaries.

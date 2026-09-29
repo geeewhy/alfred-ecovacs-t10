@@ -32,6 +32,7 @@ pub struct ReturnStatus {
     pub goal: Option<Pose>,
     pub replans: u32,
     pub elapsed_ms: u64,
+    pub navigation: serde_json::Value,
 }
 impl Default for ReturnStatus {
     fn default() -> Self {
@@ -46,6 +47,7 @@ impl Default for ReturnStatus {
             goal: None,
             replans: 0,
             elapsed_ms: 0,
+            navigation: serde_json::Value::Null,
         }
     }
 }
@@ -53,6 +55,7 @@ struct Operation {
     status: ReturnStatus,
     started: Instant,
     lost: Option<Instant>,
+    lost_reason: String,
     navigator: Navigator,
     detour: bool,
     reseat: bool,
@@ -74,6 +77,7 @@ impl Default for Operation {
             status: ReturnStatus::default(),
             started: Instant::now(),
             lost: None,
+            lost_reason: String::new(),
             navigator: Navigator::default(),
             detour: false,
             reseat: false,
@@ -154,7 +158,10 @@ impl ReturnService {
         self.operation.lock().await.status.active
     }
     pub async fn status(&self) -> ReturnStatus {
-        let mut s = self.operation.lock().await.status.clone();
+        let op = self.operation.lock().await;
+        let mut s = op.status.clone();
+        s.navigation = op.navigator.summary();
+        drop(op);
         s.map_id = self
             .geometry
             .read()
@@ -295,6 +302,10 @@ impl ReturnService {
                 "return hold={} phase={} elapsed_ms={} pose={:?}",
                 reason, op.status.state, op.status.elapsed_ms, op.status.pose
             );
+        }
+        if op.lost_reason != reason {
+            op.lost = None;
+            op.lost_reason = reason.into();
         }
         let since = op.lost.get_or_insert_with(Instant::now);
         op.status.message = reason.into();
@@ -574,7 +585,7 @@ fn obstruction(scan: &LidarScan, g: &Geometry, pose: Pose, v: f64, w: f64, docki
             continue;
         }
         if v == 0. && w.abs() > 0.05 {
-            if r < 0.225 {
+            if r < 0.18 {
                 hits += 1
             }
         } else {

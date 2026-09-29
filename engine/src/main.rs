@@ -24,10 +24,17 @@ async fn main() -> std::io::Result<()> {
             ));
         }
         #[derive(serde::Deserialize)]
+        struct Observation {
+            pose: components::return_geometry::Pose,
+            points: Vec<[f64; 2]>,
+        }
+        #[derive(serde::Deserialize)]
         struct Input {
             pose: components::return_geometry::Pose,
             goal: components::return_geometry::Pose,
             points: Vec<[f64; 2]>,
+            #[serde(default)]
+            history: Vec<Observation>,
         }
         let map =
             serde_json::from_slice(&std::fs::read(&args[2])?).map_err(std::io::Error::other)?;
@@ -37,7 +44,10 @@ async fn main() -> std::io::Result<()> {
             serde_json::from_slice(&std::fs::read(&args[3])?).map_err(std::io::Error::other)?;
         let mut planner = components::navigation::Navigator::default();
         let began = std::time::Instant::now();
-        planner.observe(&g, input.pose, 1, &input.points);
+        for (i, frame) in input.history.iter().enumerate() {
+            planner.observe(&g, frame.pose, i as u32, &frame.points);
+        }
+        planner.observe(&g, input.pose, input.history.len() as u32, &input.points);
         let command = match planner.command(&g, input.pose, input.goal, 1.) {
             components::navigation::Command::Moving(v, w) => {
                 serde_json::json!({"linear":v,"angular":w})
