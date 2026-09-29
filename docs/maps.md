@@ -161,3 +161,24 @@ A separate 150ms-delay position poll reads `/api/maps/:id/position` and only upd
 2026-09-28 wall/UI revision: removed browser area drawing/splitting/corner/opening tools and handlers, retained pan/zoom, map naming/rotation/export and robot controls. Repeated wall support now selects independent viewpoints per segment bin (10cm baseline), avoiding global 40cm frame filtering that discarded later visible surfaces. Recorded snapshot: 40/80 candidates supported before, 62/80 after; rebuilt stored structure has 55 consolidated candidates. Candidates are NOT rendered as independent black bars: that trial produced crossing clutter, rejected by user. Display uses only measured floor boundary, with thin wall/obstacle strokes. Mirror reflection in user screenshot remains unresolved; no artificial wall or traversability claim was introduced. 71 HQ tests passed, including nearby-later-view support and stationary-repeat rejection.
 
 Localization visibility investigation (2026-09-28): offline identical-map/scan replay previously returned no proposal in3.02s; revised terminal-surface visibility check returned91.67% endpoint agreement, .0663distinct-candidate cost margin in3.11s. It distinguishes a thick terminal occupied band from a separate intervening surface followed by a clear gap. Four tests pass, including repeated-room rejection, thickendpoint and true intervening walls. This Python change is staged on the bind mount but NOT loaded into the running bridge: manual capture was active, so no mapping restart occurred. Replay artifacts/hq/localization-visibility-replay.json. This is not a mirror solution. User reports real mirror producing apparent room AND entrance; need actual plane distance/extent before exclusion, question pending. Do not invent traversability or physical wall position from coherent reflected geometry.
+
+## Named sections
+
+In Maps, choose **Name section**, drag an area (or tap two opposite corners),
+enter a name, and save. Only mapped floor within the selection is included.
+Optional comma-separated aliases let “lounge” and “by the sofa” mean the same
+place. Click a section or its list entry to rename it or change its area. Remove
+has an immediate Undo. This changes annotations, not occupancy or station placement.
+
+The interaction follows direct map selection and contextual editing patterns in
+[iRobot zones](https://homesupport.irobot.com/articles/en_US/Knowledge/28251)
+and [Roborock room selection](https://support.roborock.com/hc/en-us/articles/360036401111-Roborock-S6-Map-Saving-and-Selective-Room-Cleaning).
+Because this map does not yet provide reliable automatic room segmentation,
+selection is explicit rather than presenting guessed rooms as authoritative.
+
+Alfred's HQ chat receives the current section names and aliases on each request.
+The section resolver supplies geometry and a free-space destination from the saved
+grid; it reports ambiguity across maps and returns no destination when clearance
+cannot be established. See `docs/hq-chat.md` for the API contract. Naming a section
+does not initiate movement or implement whole-room cleaning. Names currently live
+in HQ's saved maps; this does not add offline onboard speech recognition.

@@ -10,7 +10,7 @@ export class HqServer {
     this.config = config;
     this.maps = new MapService(engineClient);
     this.speech = new SpeechService(engineClient);
-    this.chat = new ChatService(this.speech);
+    this.chat = new ChatService(this.speech, {sections:()=>this.maps.sectionCatalog()});
     this.voice = new VoiceService(this.chat, this.speech);
     this.statusService = statusService;
     this.engineClient = engineClient;
@@ -33,6 +33,8 @@ export class HqServer {
           if(request.method==="PUT"){if(this.maps.active?.status.state==="scanning")await this.maps.pauseActive();else await this.maps.navigation.call("pause");return json(response,200,{ok:true,result:await this.maps.navigation.call("settings",await readJson(request))});}
         }
         if(url.pathname === "/api/maps/engine-return" && request.method === "GET") return json(response,200,{ok:true,result:await this.engineClient.onboardReturn()});
+        if(url.pathname === "/api/maps/sections" && request.method === "GET") return json(response,200,{ok:true,result:await this.maps.sectionCatalog()});
+        if(url.pathname === "/api/maps/sections/resolve" && request.method === "GET") return json(response,200,{ok:true,result:await this.maps.resolveSection(url.searchParams.get("name"),url.searchParams.get("map_id"))});
         const [, , , id, action] = url.pathname.split("/");
         let result;
         if (!id && request.method === "GET") result = await this.maps.list();

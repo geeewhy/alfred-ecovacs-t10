@@ -1,3 +1,4 @@
+import {sectionNames, sectionGeometry, normalizeSectionName, sectionTarget} from './sections.mjs';
 import { livePosition } from "./live-position.mjs";
 import { stationObservation, retainStation } from "./station.mjs";
 import { NativeScanner, GraphScanner, NavigationClient } from "./native-scanner.mjs";
@@ -199,6 +200,16 @@ export class MapService {
         case "rename-map":
           m.name = name(body.name);
           break;
+        case "save-section": {
+          const existing=body.id ? m.areas.find(a=>a.id===body.id) : null;
+          if(body.id && !existing)throw Error("This section no longer exists. Reload the map.");
+          const names=sectionNames(body.name,body.aliases||[],m.areas.filter(a=>a!==existing));
+          const geometry=body.points ? sectionGeometry(m,body.points) : existing?.geometry;
+          if(!geometry)throw Error("Select a section on the map first.");
+          const section={...(existing||{id:randomUUID()}),...names,geometry,area:area(geometry)};
+          if(existing)m.areas[m.areas.indexOf(existing)]=section;else m.areas.push(section);
+          break;
+        }
         case "draw":
           m.areas.push(
             make(
@@ -257,6 +268,25 @@ export class MapService {
       await this.save(m);
       return this.get(id);
     });
+  }
+
+  async sectionCatalog() {
+    const maps=await this.list();
+    return Promise.all(maps.map(async ({id,name})=>{
+      const map=await this.load(id);
+      return {mapId:id,mapName:name,revision:map.revision,sections:map.areas.map(a=>({id:a.id,name:a.name,aliases:a.aliases||[],area:a.area}))};
+    }));
+  }
+  async resolveSection(query,mapId) {
+    if(typeof query!=="string" || !normalizeSectionName(query) || query.length>80)throw Error("Provide a section name.");
+    if(mapId)this.path(mapId);
+    const catalog=await this.sectionCatalog(),key=normalizeSectionName(query),matches=[];
+    for(const m of catalog)if(!mapId||m.mapId===mapId)for(const s of m.sections)if([s.name,...s.aliases].some(n=>normalizeSectionName(n)===key))matches.push({...s,mapId:m.mapId,mapName:m.mapName,revision:m.revision});
+    if(matches.length!==1)return {status:matches.length?'ambiguous':'not-found',matches};
+    const match=matches[0],map=await this.load(match.mapId),section=map.areas.find(s=>s.id===match.id);
+    // A concurrent rename/removal must never resolve stale labels to a destination.
+    if(map.revision!==match.revision || !section)return {status:'changed',matches:[]};
+    return {status:'resolved',section:{...match,geometry:section.geometry,target:sectionTarget(map,section)}};
   }
 
   summary() {

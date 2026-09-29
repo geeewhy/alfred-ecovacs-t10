@@ -1,3 +1,4 @@
+import {sectionsMarkup,mountSections} from "./map-sections.js";
 import {stationMarker,boundaryMarkers,floorSurface, planDetails,planDimensions} from "./floor-plan.js";
 const esc = (s) =>
   String(s).replace(
@@ -8,7 +9,7 @@ const esc = (s) =>
       ],
   );
 export function mapsPage(controls = "", settings = "") {
-  return `<section class="maps-page"><header class="maps-heading"><div><span class="eyebrow">ALFRED / SPATIAL</span><h1>Maps</h1></div><div><select id="map-select" aria-label="Saved map"></select><button id="map-new">New map</button></div></header><div class="map-toolbar"><select id="scan-mode" aria-label="Scan mode"><option value="explore">Explore automatically</option><option value="deep">Deep pass · verify all walls</option><option value="manual">Manual capture</option></select><label class="scan-duration"><input id="scan-minutes" type="number" value="10" min="1" max="60" aria-label="Maximum scan minutes"> min</label><button data-scan="start">Start scan</button><button data-scan="pause">Pause</button><button data-scan="resume">Resume</button><button data-scan="locate" title="May move a short distance to find a clearer view">Locate Alfred</button><button data-scan="finish">Finish scan</button><button id="map-emergency">Stop movement</button></div><div class="map-scan-progress" role="status" aria-live="polite"><strong id="map-scan-state">No scan</strong><span id="map-scan-detail">Create or choose a map.</span><small id="map-sensors"></small></div><div class="map-workspace"><div class="map-stage"><div class="map-tools"><button id="map-fit">Fit</button><label><input id="map-vector" type="checkbox" checked> Floor plan</label><label><input id="map-measurements" type="checkbox"> Measurements</label><label><input id="map-dimensions" type="checkbox" checked> Dimensions</label></div><svg id="map-svg" role="img" aria-label="Live floor plan" tabindex="0" viewBox="-5 -5 10 10"></svg><div id="map-plan-empty" class="map-plan-empty" hidden>Building the floor plan from the live scan.</div><div class="map-legend" aria-label="Map legend"><span class="map-key-wall">Likely walls</span><span class="map-key-obstacle">Obstacles</span><span class="map-key-unknown">Unscanned</span><span id="map-deep-legend" hidden>Deep pass: green checked · amber pending · blue current</span></div><div id="map-hint">Create a map to begin.</div></div><aside class="map-inspector"><section id="map-manual-controls" hidden>${controls}</section><p id="map-position-status" role="status">Position: waiting</p><label>Map name<input id="map-name" maxlength="80"></label><button id="map-rename">Save name</button><h2>Station</h2><p id="map-station-status" class="map-muted"></p><button data-scan="locate" data-station="true" title="May briefly leave the dock to verify its map position">Locate station</button><button id="map-return-onboard">Return onboard</button><button id="map-return">HQ-guided return (backup)</button><p id="engine-return-status" class="map-muted" role="status"></p><hr><button id="map-svg-export">Export SVG</button><button id="map-png-export">Export PNG</button><hr><label>Plan rotation<input id="map-rotation" type="number" step="1" placeholder="Automatic wall alignment"></label><button id="map-set-rotation">Apply rotation</button><hr><button id="map-delete">Delete map</button></aside></div><p id="map-message" role="status" aria-live="polite"></p>${settings}</section>`;
+  return `<section class="maps-page"><header class="maps-heading"><div><span class="eyebrow">ALFRED / SPATIAL</span><h1>Maps</h1></div><div><select id="map-select" aria-label="Saved map"></select><button id="map-new">New map</button></div></header><div class="map-toolbar"><select id="scan-mode" aria-label="Scan mode"><option value="explore">Explore automatically</option><option value="deep">Deep pass · verify all walls</option><option value="manual">Manual capture</option></select><label class="scan-duration"><input id="scan-minutes" type="number" value="10" min="1" max="60" aria-label="Maximum scan minutes"> min</label><button data-scan="start">Start scan</button><button data-scan="pause">Pause</button><button data-scan="resume">Resume</button><button data-scan="locate" title="May move a short distance to find a clearer view">Locate Alfred</button><button data-scan="finish">Finish scan</button><button id="map-emergency">Stop movement</button></div><div class="map-scan-progress" role="status" aria-live="polite"><strong id="map-scan-state">No scan</strong><span id="map-scan-detail">Create or choose a map.</span><small id="map-sensors"></small></div><div class="map-workspace"><div class="map-stage"><div class="map-tools"><button id="map-fit">Fit</button><label><input id="map-vector" type="checkbox" checked> Floor plan</label><label><input id="map-measurements" type="checkbox"> Measurements</label><label><input id="map-dimensions" type="checkbox" checked> Dimensions</label></div><svg id="map-svg" role="group" aria-label="Floor plan, drag to pan or name a section" tabindex="0" viewBox="-5 -5 10 10"></svg><div id="map-plan-empty" class="map-plan-empty" hidden>Building the floor plan from the live scan.</div><div class="map-legend" aria-label="Map legend"><span class="map-key-wall">Likely walls</span><span class="map-key-obstacle">Obstacles</span><span class="map-key-unknown">Unscanned</span><span id="map-deep-legend" hidden>Deep pass: green checked · amber pending · blue current</span></div><div id="map-hint">Create a map to begin.</div></div><aside class="map-inspector">${sectionsMarkup()}<section id="map-manual-controls" hidden>${controls}</section><p id="map-position-status" role="status">Position: waiting</p><label>Map name<input id="map-name" maxlength="80"></label><button id="map-rename">Save name</button><h2>Station</h2><p id="map-station-status" class="map-muted"></p><button data-scan="locate" data-station="true" title="May briefly leave the dock to verify its map position">Locate station</button><button id="map-return-onboard">Return onboard</button><button id="map-return">HQ-guided return (backup)</button><p id="engine-return-status" class="map-muted" role="status"></p><hr><button id="map-svg-export">Export SVG</button><button id="map-png-export">Export PNG</button><hr><label>Plan rotation<input id="map-rotation" type="number" step="1" placeholder="Automatic wall alignment"></label><button id="map-set-rotation">Apply rotation</button><hr><button id="map-delete">Delete map</button></aside></div><p id="map-message" role="status" aria-live="polite"></p>${settings}</section>`;
 }
 export function mountMaps({stopDrive = ()=>{}} = {}) {
   let alive = true,
@@ -26,6 +27,7 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
     pointer = null;
   const $ = (s) => document.querySelector(s),
     svg = $("#map-svg");
+  const sections = mountSections({getMap:()=>map,render,edit:async body=>{if(busy)throw Error("Wait for the current map update, then save again.");busy=true;try{await edit(body);}finally{busy=false;}},stopDrive});
   const message = (s) => {
     if (alive) $("#map-message").textContent = s;
   };
@@ -83,6 +85,7 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
   }
   function render(inspector = true) {
     if (!alive) return;
+    sections.sync();
     const nextAngle=(map?.displayAngle||0)*Math.PI/180;
     if(nextAngle!==angle){angle=nextAngle;fit();}
     svg.setAttribute("viewBox", view.join(" "));
@@ -103,7 +106,7 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
         "beforeend",
         `<path d="M${map.scan.path.map(([x, y]) => `${x},${-y}`).join("L")}" fill="none" stroke="#6d92bd" stroke-width=".025" stroke-dasharray=".08 .06"/>`,
       );
-    svg.insertAdjacentHTML("beforeend",boundaryMarkers(map)+stationMarker(map));
+    svg.insertAdjacentHTML("beforeend",sections.overlay()+boundaryMarkers(map)+stationMarker(map));
     const layer=document.createElementNS("http://www.w3.org/2000/svg","g");
     layer.id="map-content";layer.setAttribute("transform",`rotate(${angle*180/Math.PI})`);
     while(svg.firstChild)layer.append(svg.firstChild);svg.append(layer);
@@ -128,7 +131,8 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
     $(".map-scan-progress").dataset.state = state;
     $("#map-delete").disabled = !map;
 
-    $("#map-hint").textContent = "Drag to pan · scroll to zoom";
+    sections.sync();
+    $("#map-hint").textContent = svg.dataset.sectionSelecting==='true' ? "Drag an area or tap two corners · Escape to cancel" : "Drag to pan · scroll to zoom · click a section to edit";
     $("#map-return-onboard").onclick=()=>action(async()=>{if(!map)return;await stopDrive();const state=await api("/"+map.id+"/return-onboard",{});$("#engine-return-status").textContent=state.message;message("Return is running on Alfred. HQ can disconnect.");});
     $("#map-return").onclick=()=>action(async()=>{if(!map)return;await stopDrive();map=await api("/"+map.id+"/return",{});render();});
   document.querySelectorAll("[data-scan]").forEach((b) => {
@@ -181,11 +185,12 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
   }
   async function edit(body) {
     if (!map) throw Error("Create or choose a map first.");
-    const m = await api("/" + map.id + "/edit", {
+    const editingId=map.id;
+    const m = await api("/" + editingId + "/edit", {
       revision: map.revision,
       ...body,
     });
-    if (!alive) return;
+    if (!alive || map?.id!==editingId) return;
     map = m;
     render();
     message("Saved.");
@@ -252,21 +257,28 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
   }
   svg.onpointerdown = e => {
     if(e.button!==0) return;
-    pointer={x:e.clientX,y:e.clientY,view:[...view]};
+    if(sections.down(e,point(e))){svg.setPointerCapture(e.pointerId);return;}
+    pointer={x:e.clientX,y:e.clientY,view:[...view],sectionId:e.target.closest("[data-section-id]")?.dataset.sectionId};
     svg.setPointerCapture(e.pointerId);
   };
   svg.onpointermove = e => {
+    if(sections.move(e,point(e)))return;
     if(!pointer)return;
     const rect=svg.getBoundingClientRect(),scale=Math.max(view[2]/rect.width,view[3]/rect.height);
     view=[pointer.view[0]-(e.clientX-pointer.x)*scale,pointer.view[1]-(e.clientY-pointer.y)*scale,...pointer.view.slice(2)];
     svg.setAttribute("viewBox",view.join(" "));
   };
-  svg.onpointerup = () => {pointer=null;};
+  svg.onpointerup = e => {
+    if(sections.up(e,point(e)))return;
+    if(pointer?.sectionId && Math.hypot(e.clientX-pointer.x,e.clientY-pointer.y)<5)sections.select(pointer.sectionId);
+    pointer=null;
+  };
   svg.addEventListener(
     "wheel",
     (e) => {
       e.preventDefault();
-      const [x, y] = point(e),
+      const screenPoint=new DOMPoint(e.clientX,e.clientY).matrixTransform(svg.getScreenCTM().inverse());
+      const [x, y] = [screenPoint.x,-screenPoint.y],
         f = e.deltaY > 0 ? 1.15 : 1 / 1.15;
       if (view[2] * f < 0.5 || view[2] * f > 120) return;
       view = [
@@ -281,6 +293,7 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
   );
   svg.onpointercancel = () => {
     pointer = null;
+    sections.cancelPointer();
     render(false);
   };
   $("#map-emergency").onclick = () => {
@@ -296,7 +309,7 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
       .catch((e) => message(e.message));
   };
   const key = (e) => {
-    if (/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    if (/INPUT|SELECT|TEXTAREA|BUTTON/.test(e.target.tagName)) return;
     if (e.code === "Space") {
       e.preventDefault();
       $("#map-emergency").click();
@@ -382,7 +395,9 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
       if (map && !busy && ["scanning", "locating", "paused"].includes(map.scan.state)) {
         const id = map.id,
           m = await api("/" + id);
-        if (alive && map?.id === id && !busy) {
+        if (alive && map?.id === id && !busy && m.revision >= map.revision) {
+          map.areas = m.areas;
+          map.revision = m.revision;
           map.cells = m.cells;
           map.vectors = m.vectors;
           map.structure = m.structure;
@@ -408,6 +423,7 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
   }).then(()=>{poll();pollPosition();});
   return () => {
     alive = false;
+    sections.dispose();
     clearTimeout(timer);
     clearTimeout(poseTimer);
     stopDrive().catch(()=>{});

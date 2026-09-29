@@ -532,6 +532,7 @@ function startControls() {
 }
 
 function manualControlsAvailable() {
+  if (location.pathname === "/maps" && !document.querySelector("#section-form")?.hidden) return false;
   return location.pathname === "/cockpit" || (location.pathname === "/maps" && document.querySelector("#map-manual-controls")?.hidden === false);
 }
 const keyDirections = { ArrowUp: "forward", ArrowDown: "reverse", ArrowLeft: "left", ArrowRight: "right" };

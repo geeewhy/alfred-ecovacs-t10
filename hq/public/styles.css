@@ -283,3 +283,46 @@ body.cockpit-mode .cockpit-content {height:auto;flex:1;min-height:0}
 #map-manual-controls .dpad { width: 172px; grid-template: repeat(3, 52px) / repeat(3, 52px); margin: 16px auto; }
 #map-manual-controls .dpad button { touch-action: none; }
 #map-position-status { color: #52647a; font-size: 12px; }
+
+/* Section names are spatial annotations, with a single contextual editor. */
+.map-sections { padding-bottom:16px; border-bottom:1px solid var(--line); }
+.sections-heading {display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;}
+.map-inspector .sections-heading h2 {margin:0;font-size:15px;}
+.sections-heading button {font-size:11px;padding:7px 9px;}
+.section-row {display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;text-align:left;border:0;border-radius:4px;padding:9px 7px;background:transparent;font-size:12px;}
+.section-row>span:first-child {min-width:0;overflow-wrap:anywhere;}
+.section-row small {display:block;font-size:10px;font-weight:400;color:var(--muted);margin-top:3px;}
+.section-row>span:last-child {flex:none;font-size:10px;color:var(--muted);}
+.section-row:hover,.section-row[aria-pressed="true"] {background:oklch(.95 .018 265);}
+#section-form {display:flex;flex-direction:column;gap:8px;margin-top:12px;}
+#section-form[hidden],#section-undo[hidden],#section-form [hidden] {display:none;}
+#section-form label {display:block;font-weight:550;}
+#section-form input {width:100%;min-width:0;font-size:12px;}
+#section-step {margin:0 0 5px;font-size:12px;line-height:1.5;color:oklch(.4 .05 265);}
+.section-suggestions {display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;}
+.section-suggestions button {font-size:10px;padding:5px 7px;border-radius:4px;background:oklch(.978 .003 250);}
+.section-example {font-size:11px;line-height:1.5;color:var(--muted);margin:0;overflow-wrap:anywhere;}
+#section-error {color:oklch(.45 .16 25);font-size:12px;line-height:1.5;margin:0;}
+#section-error:empty {display:none;}
+.section-actions,.section-secondary {display:flex;gap:6px;flex-wrap:wrap;}
+.section-actions button {font-size:12px;}
+#section-save {background:oklch(.55 .17 265);color:oklch(.99 .005 265);border-color:transparent;}
+#section-save:hover:not(:disabled){background:oklch(.48 .17 265);}
+.section-secondary {justify-content:space-between;margin-top:4px;}
+.section-secondary button,#section-undo button {font-size:11px;padding:5px 0;border:0;background:transparent;text-decoration:underline;text-underline-offset:3px;}
+#section-remove {color:oklch(.46 .12 25);}
+#section-undo {font-size:12px;margin-top:10px;}
+.map-section {cursor:pointer;}
+.map-section:hover>path,.map-section.is-selected>path {fill:oklch(.55 .17 265 / .18);stroke:oklch(.55 .17 265);}
+#map-svg {cursor:grab;}
+#map-svg[data-section-selecting="true"] {cursor:crosshair;}
+#map-svg[data-section-selecting="true"] .map-section {pointer-events:none;}
+.map-sections :focus-visible {outline:2px solid oklch(.55 .17 265);outline-offset:3px;}
+@media(max-width:850px){
+  body.maps-mode .shell {grid-template-columns:minmax(0,1fr);}
+  body.maps-mode .rail {min-width:0;overflow-x:auto;}
+  .maps-heading>div {min-width:0;}
+  .maps-heading select {max-width:100%;}
+  .map-workspace {grid-template-columns:minmax(0,1fr);}
+  .map-inspector {min-width:0;}
+}
