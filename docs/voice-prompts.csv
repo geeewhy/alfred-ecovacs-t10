@@ -1,0 +1,19 @@
+event,previous_phrase,new_phrase,voice,firmware_paths,change
+startup,"Hello, my good sir.","Hello, my good sir.",Daniel,/media/music/ZH/0.ogg,unchanged
+charging,Recharging sir.,Recharging sir.,Daniel,/media/music/EN/119.ogg;/media/music/ZH/119.ogg,unchanged
+returning,Back to station.,Returning sir.,Daniel,/media/music/EN/117.ogg;/media/music/ZH/117.ogg,replaced
+return-cancelled,Stop returning.,Return cancelled sir.,Daniel,/media/music/EN/118.ogg;/media/music/ZH/118.ogg,replaced
+docked,I am in the station.,Safely docked sir.,Daniel,/media/music/EN/20.ogg;/media/music/ZH/20.ogg,replaced
+find-robot,I'm here.,At your service.,Daniel,/media/music/EN/30.ogg;/media/music/ZH/30.ogg,replaced
+resume-cleaning,Start continuous cleaning.,Resuming duties sir.,Daniel,/media/music/EN/108.ogg;/media/music/ZH/108.ogg,replaced
+low-battery,"Low battery, I'm about to shut down.",Battery depleted sir.,Daniel,/media/music/EN/24.ogg;/media/music/ZH/24.ogg,replaced
+blocked,Please help and clear the obstacles.,Passage blocked sir.,Daniel,/media/music/EN/122.ogg;/media/music/ZH/122.ogg,replaced
+lifted,"Off the floor, please put me back.",Lower me please.,Daniel,/media/music/EN/3.ogg;/media/music/ZH/3.ogg,replaced
+brush-tangled,"Main brush tangled, please clean up.",Brush tangled sir.,Daniel,/media/music/EN/31.ogg;/media/music/ZH/31.ogg,replaced
+dustbin-missing,"Dust bin not installed, please check.",Dustbin missing sir.,Daniel,/media/music/EN/6.ogg;/media/music/ZH/6.ogg,replaced
+wifi-setup,Ready for network setup.,Awaiting network sir.,Daniel,/media/music/EN/137.ogg;/media/music/ZH/137.ogg,replaced
+wheels-stuck,"Unable to move further, please check the driving wheels.",Wheels stuck sir.,Daniel,/media/music/EN/4.ogg;/media/music/ZH/4.ogg,replaced
+cliff-sensors-dirty,Anti-drop sensors are dirty. Please clean the anti-drop sensors.,Clean cliff sensors.,Daniel,/media/music/EN/35.ogg;/media/music/ZH/35.ogg,replaced
+bumper-stuck,"Bumper stuck, please gently tap the bumper and make sure it bounces back.",Bumper stuck sir.,Daniel,/media/music/EN/124.ogg;/media/music/ZH/124.ogg,replaced
+charging-power-off,"Unable to charge, please switch on the power.",Power on please.,Daniel,/media/music/EN/29.ogg;/media/music/ZH/29.ogg,replaced
+station-not-found,"Unable to find the station signal. Please manually move DEEBOT to the front of station, then tap Recall to try again.",Station missing sir.,Daniel,/media/music/EN/120.ogg;/media/music/ZH/120.ogg,replaced
