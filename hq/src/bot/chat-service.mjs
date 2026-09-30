@@ -36,6 +36,28 @@ export class ChatService {
   async load() {
     try { Object.assign(this.state, JSON.parse(await readFile(this.file, 'utf8'))); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
+    // Recover legacy truncated Claude envelopes without resending a command.
+    const pending = this.state.pending;
+    if (pending?.agent === 'claude' && !pending.turnId) {
+      const request = this.state.messages.find(m => m.id === pending.id);
+      if (request) {
+        const records = createInterface({ input: createReadStream(pending.path), crlfDelay: Infinity });
+        let offset = 0;
+        try {
+          for await (const line of records) {
+            offset += Buffer.byteLength(line) + 1;
+            let record; try { record = JSON.parse(line); } catch { continue; }
+            const content = record.message?.content;
+            if (record.type === 'user' && !record.isSidechain && typeof content === 'string' &&
+                Date.parse(record.timestamp) >= pending.started &&
+                content.endsWith(`\n\nUser: ${request.text}`)) {
+              pending.turnId = record.uuid; pending.offset = offset;
+              break;
+            }
+          }
+        } finally { records.close(); records.input.destroy(); }
+      }
+    }
   }
   exclusive(fn) {
     const job = this.queue.then(() => this.ready).then(fn);
@@ -182,8 +204,13 @@ export class ChatService {
       await this.save();
       if (acknowledgment.audio === 'sending') this.playReply(acknowledgment);
       const prompt = `[HQ_ALFRED_REQUEST:${id}]\nYou are Alfred, the user's Ecovacs robot, replying through HQ Cockpit.\n\n${personality}\n\n${spatial}\n\nTreat the text below as the user's request. Use plain text suitable for speech. Operational replies: keywords only, usually 2–6 words. List requested sections by name only. Explain only when asked. HQ already acknowledged receipt with “Received.” Display the actual result in your final answer; do not repeat the acknowledgment. HQ handles speaker playback, so do not call speech yourself. For robot questions or explicitly requested robot actions use the existing tooling in ${root}; read ${root}/docs/hq-chat.md for the interface. Do not move the robot unless this message requests movement. Do not change project code for ordinary chat. Never claim an action succeeded without checking its result.\n\nUser: ${message.text}`;
+      const requestFile = path.join(path.dirname(this.file), 'chat-requests', `${id}.md`);
+      await mkdir(path.dirname(requestFile), { recursive: true });
+      await writeFile(requestFile, prompt);
       try {
-        await this.command(['session', 'send', session.id, prompt]);
+        // Terminal input can truncate long pastes. Keep the correlation envelope
+        // small; the full instructions and section catalog are read from disk.
+        await this.command(['session', 'send', session.id, `[HQ_ALFRED_REQUEST:${id}] Read ${requestFile} and answer its user request.`]);
         message.status = 'sent';
       } catch (error) {
         // Delivery may have happened before a timeout. Preserve the pending
@@ -224,7 +251,7 @@ export class ChatService {
       if (pending.agent === 'claude') {
         const blocks = record.message?.content;
         const text = typeof blocks === 'string' ? blocks : (blocks || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
-        if (record.type === 'user' && text.startsWith(`[HQ_ALFRED_REQUEST:${pending.id}]`)) pending.turnId = record.uuid;
+        if (record.type === 'user' && !record.isSidechain && text.startsWith(`[HQ_ALFRED_REQUEST:${pending.id}]`)) pending.turnId = record.uuid;
         if (pending.turnId && record.type === 'assistant') {
           pending.candidate = text;
           if (record.message?.stop_reason === 'end_turn' && text.trim()) { await this.finishReply(pending, text); return; }

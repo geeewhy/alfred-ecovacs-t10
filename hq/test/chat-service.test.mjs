@@ -87,7 +87,7 @@ test('acceptance acknowledges before delivery and serializes receipt/result play
     let release;
     const speech={say:async text=>{spoken.push(text);if(text==='Received.')await new Promise(resolve=>{release=resolve;});}};
     const service=new ChatService(speech,{file,poll:false,command:async args=>{
-      if(args[1]==='send')assert.equal(service.state.messages.at(-1).text,'Received.');
+      if(args[1]==='send'){assert.equal(service.state.messages.at(-1).text,'Received.');assert.ok(args[3].length<500);assert.match(args[3],/^\[HQ_ALFRED_REQUEST:/);assert.match(args[3],/chat-requests/);}
       return {};
     }});
     await service.ready;
@@ -101,5 +101,22 @@ test('acceptance acknowledges before delivery and serializes receipt/result play
     assert.deepEqual(spoken,['Received.','Ready.']);
     assert.equal(service.state.messages[1].audio,'sent');
     assert.equal(service.state.messages[2].audio,'sent');
+  } finally {await rm(dir,{recursive:true,force:true});}
+});
+
+test('Claude truncated legacy request recovers its existing final without resending', async () => {
+  const dir=await mkdtemp(path.join(tmpdir(),'alfred-chat-'));
+  try {
+    const file=path.join(dir,'chat.json'), transcript=path.join(dir,'transcript.jsonl');
+    const started=Date.now()-10000;
+    await writeFile(transcript,[
+      {type:'user',uuid:'user',timestamp:new Date(started+1).toISOString(),message:{content:'truncated instructions\n\nUser: which model?'}},
+      {type:'assistant',message:{content:[{type:'text',text:'Haiku.'}],stop_reason:'end_turn'}}
+    ].map(JSON.stringify).join('\n')+'\n');
+    await writeFile(file,JSON.stringify({messages:[{id:'r',text:'which model?'}],pending:{id:'r',agent:'claude',path:transcript,offset:999,started,turnId:null}}));
+    const service=new ChatService({}, {file,poll:false,command:async()=>{throw Error('Must not resend');}});
+    await service.exclusive(()=>service.poll());
+    assert.equal(service.state.pending,null);
+    assert.equal(service.state.messages.at(-1).text,'Haiku.');
   } finally {await rm(dir,{recursive:true,force:true});}
 });
