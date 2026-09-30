@@ -1,9 +1,7 @@
 import { diagnosticState } from "../infra/diagnostics.mjs";
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 export class VoiceService {
   constructor(chat, speech) {
@@ -27,15 +25,14 @@ export class VoiceService {
     if (!this.child && !this.starting && this.state.status !== 'error') {
       this.starting = true;
       try {
-        const { stdout } = await exec('pyenv', ['which', 'whisper'], { timeout: 3000 });
-        const python = path.join(path.dirname(stdout.trim()), 'python');
+        const python = process.env.ALFRED_VOICE_PYTHON || path.join(root, '.venv-voice/bin/python');
         const child = spawn(python, [path.join(root, 'runtime/voice_listener.py')], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
         this.lastHeard = null; this.meter = null; this.transcription = null; this.workerState = null;
         this.child = child; this.state = { status: 'loading', message: 'Starting robot microphone' };
         const startup = setTimeout(() => {
-          this.state = { status: 'error', message: 'Microphone startup exceeded 15 seconds' };
+          this.state = { status: 'error', message: 'Microphone startup exceeded 75 seconds' };
           child.stdin.end(); child.kill('SIGTERM');
-        }, 15000);
+        }, 75000);
         let buffer = '', errors = '';
         child.stdout.on('data', data => {
           buffer += data.toString();
@@ -68,7 +65,14 @@ export class VoiceService {
     if (this.child?.stdin.writable) {
       const preparing = state.sessionStatus !== 'ready';
       const paused = preparing || !!state.pending || this.speech.busy || Date.now() < (this.speech.speakingUntil || 0);
-      this.child.stdin.write(JSON.stringify({ paused }) + '\n');
+      if (!this.vocabularyAt || Date.now()-this.vocabularyAt>30000) {
+        try {
+          const maps = await this.chat.sections();
+          this.vocabulary = [...new Set(maps.flatMap(map=>map.sections.flatMap(section=>[section.name,...(section.aliases||[])])))].slice(0,60);
+          this.vocabularyAt = Date.now();
+        } catch { this.vocabularyAt = Date.now(); }
+      }
+      if (this.child?.stdin.writable) this.child.stdin.write(JSON.stringify({ paused, vocabulary:this.vocabulary || [] }) + '\n');
       if (paused) this.state = { status: 'paused', message: preparing ? (state.error || 'Connecting Alfred’s chat session…') : 'Listening paused while Alfred replies' };
       else if (this.state.status === 'paused') this.state = { ...(this.workerState || { status: 'listening', message: 'Listening. Speak to Alfred.' }), lastHeard: this.lastHeard, meter: this.meter, transcription: this.transcription };
     }

@@ -8,3 +8,5 @@ __pycache__/
 
 mapping/vendor/
 mapping/state/
+
+.venv-voice/

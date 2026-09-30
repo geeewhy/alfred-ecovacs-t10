@@ -42,3 +42,21 @@ console.log(JSON.stringify({ok: data.ok, error: data.error}));
 ```
 
 Transcript polling streams complete JSONL records, including records larger than 1 MB. Partial trailing records remain unread until complete.
+
+### Local speech recognition
+
+HQ uses MLX Whisper `mlx-community/whisper-large-v3-turbo` on the Mac's Apple Silicon GPU, replacing CPU Whisper tiny. Install with Python 3.10–3.12 (`audioop` is required):
+
+```sh
+python3.10 -m venv .venv-voice
+.venv-voice/bin/python -m pip install -r setup/voice-requirements.txt
+.venv-voice/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('mlx-community/whisper-large-v3-turbo')"
+```
+
+Download the weights before starting HQ. The model remains resident in the listener and warms up before opening the microphone. `ALFRED_VOICE_PYTHON` overrides the interpreter; `ALFRED_STT_MODEL` overrides the model. Recognition stays local. Saved section names/aliases refresh every 30 seconds as vocabulary hints, not command substitutions. Existing no-speech/confidence rejection remains. Transcription telemetry includes model and inference duration. Silence endpoint is one second; pre-roll retains roughly half a second of audio.
+
+Microphone HTTP failures now include the engine response body. Engine capture cleanup retains its lease while waiting for TERM, escalates to KILL after two seconds, and reaps the process before permitting another capture. This prevents a stuck SDK reader from retaining the microphone lock indefinitely. Regression test covers a child ignoring TERM.
+
+M4 Pro local generated-speech smoke check: “Alfred, go to the study room, then return to the charging station.” transcribed correctly, 3.55 seconds cold / 0.55 seconds warm. This is not a real-room accuracy benchmark. Capture recovery deployed as engine MD5 `7acc865abc103c7181adf5abe3575150`.
+
+Live microphone verification subsequently recognized “Alfred, can you hear me?” in 0.511 seconds (3.01-second captured utterance). Prompted digital silence produced repetitive text despite passing the old confidence gate; compression-ratio rejection (<2.4) now blocks that case, verified at ratio22.4. Energy gating still precedes inference.

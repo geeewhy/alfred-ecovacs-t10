@@ -326,3 +326,15 @@ body.cockpit-mode .cockpit-content {height:auto;flex:1;min-height:0}
   .map-workspace {grid-template-columns:minmax(0,1fr);}
   .map-inspector {min-width:0;}
 }
+
+/* Keep each map task within its own bounded inspector pane. */
+.map-inspector {padding:0;overflow:hidden;gap:0;min-height:0;}
+.inspector-tabs {display:flex;flex:none;border-bottom:1px solid var(--line);padding:6px 10px 0;gap:4px;}
+.inspector-tabs [role="tab"] {flex:1;border:0;border-radius:0;background:transparent;padding:12px 4px;font-size:12px;color:var(--muted);border-bottom:2px solid transparent;}
+.inspector-tabs [aria-selected="true"] {color:var(--text);border-bottom-color:oklch(.55 .17 265);font-weight:600;}
+.inspector-panel {padding:16px;overflow:auto;min-height:0;display:flex;flex-direction:column;gap:9px;}
+.inspector-panel[hidden],#section-list[hidden],#sections-intro[hidden],#section-add[hidden] {display:none;}
+.inspector-panel .map-sections {padding:0;border:0;}
+.map-inspector .section-row {border:0;border-bottom:1px solid var(--line);border-radius:0;box-shadow:none;padding:10px 2px;min-height:38px;}
+.inspector-tabs :focus-visible {outline:2px solid oklch(.55 .17 265);outline-offset:-3px;}
+@media(max-width:850px){.map-inspector {max-height:440px;}.inspector-panel {max-height:390px;}}

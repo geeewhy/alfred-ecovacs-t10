@@ -21,7 +21,7 @@ export function selectionCorners(a,b,angle) {
 }
 export const sectionsMarkup=()=>`<section class="map-sections" aria-labelledby="sections-title"><div class="sections-heading"><h2 id="sections-title">Sections</h2><button id="section-add" type="button">Name section</button></div><p id="sections-intro" class="map-muted">Give Alfred names for places you talk about.</p><div id="section-list"></div><form id="section-form" hidden><p id="section-step" role="status"></p><label for="section-name">Section name</label><input id="section-name" maxlength="48" required autocomplete="off" placeholder="e.g. Living room"><div class="section-suggestions" aria-label="Common section names">${['Kitchen','Living room','Bedroom','Hallway'].map(n=>`<button type="button" data-section-name="${n}">${n}</button>`).join('')}</div><label for="section-aliases">Also called <span class="map-muted">(optional)</span></label><input id="section-aliases" maxlength="390" placeholder="Lounge, by the sofa" aria-describedby="section-alias-help"><p id="section-alias-help" class="map-muted">Separate names with commas. Alfred knows they mean the same place.</p><p id="section-example" class="section-example"></p><p id="section-error" role="alert"></p><div class="section-actions"><button id="section-save" type="submit">Save section</button><button id="section-cancel" type="button">Cancel</button></div><div class="section-secondary"><button id="section-reselect" type="button">Change area</button><button id="section-remove" type="button">Remove section</button></div></form><div id="section-undo" hidden role="status"><span>Section removed.</span> <button type="button">Undo</button></div></section>`;
 
-export function mountSections({getMap,render,edit,stopDrive}) {
+export function mountSections({getMap,render,edit,stopDrive,onOpen=()=>{}}) {
   const $=s=>document.querySelector(s),form=$('#section-form'),svg=$('#map-svg');
   let mapId=null,signature='',draft=null,selecting=false,first=null,drag=null,saving=false,undoRevision=null;
   const error=text=>{$('#section-error').textContent=text;};
@@ -34,10 +34,14 @@ export function mountSections({getMap,render,edit,stopDrive}) {
   function sync(){
     const map=getMap();
     if(map?.id!==mapId){mapId=map?.id;signature='';draft=null;selecting=false;first=null;drag=null;form.hidden=true;undoRevision=null;}
+    $('#section-list').hidden=!!draft;
+    $('#sections-intro').hidden=!!draft;
+    $('#section-add').hidden=!!draft;
+    $('#sections-title').textContent=draft?(draft.id?'Edit section':'New section'):'Sections';
     $('#section-add').disabled=!map?.structure?.floor?.geometry?.length||saving;
     $('#sections-intro').textContent=!map?.structure?.floor?.geometry?.length?'Scan a floor first, then give its sections names.':'Give Alfred names for places you talk about.';
     const next=JSON.stringify([map?.id,map?.areas,draft?.id]);
-    if(signature!==next){signature=next;$('#section-list').innerHTML=(map?.areas||[]).map(a=>`<button type="button" class="section-row" data-section-id="${esc(a.id)}" aria-pressed="${draft?.id===a.id}"><span>${esc(a.name)}<small>${a.aliases?.length?esc(a.aliases.join(' · ')):'Click to edit'}</small></span><span>${a.area.toFixed(1)} m²</span></button>`).join('');}
+    if(signature!==next){signature=next;$('#section-list').innerHTML=(map?.areas||[]).map(a=>`<button type="button" class="section-row" data-section-id="${esc(a.id)}" aria-pressed="${draft?.id===a.id}"><span>${esc(a.name)}${a.aliases?.length?`<small>${esc(a.aliases.join(' · '))}</small>`:''}</span><span>${a.area.toFixed(1)} m²</span></button>`).join('');}
     $('#section-undo').hidden=undoRevision!==map?.revision;
     svg.dataset.sectionSelecting=String(selecting);
   }
@@ -49,6 +53,7 @@ export function mountSections({getMap,render,edit,stopDrive}) {
     try{await stopDrive();}catch(e){$('#sections-intro').textContent=e.message;return;}
     if(getMap()?.id!==map.id)return;
     draft=section?structuredClone(section):{id:null};selecting=!section;first=null;drag=null;undoRevision=null;
+    onOpen();
     form.hidden=false;error('');$('#section-name').value=section?.name||'';$('#section-aliases').value=(section?.aliases||[]).join(', ');
     $('#section-step').textContent=section?'Edit this section.':'Drag over the section, or tap two opposite corners.';
     $('#section-reselect').hidden=!section;$('#section-remove').hidden=!section;

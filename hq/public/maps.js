@@ -9,7 +9,7 @@ const esc = (s) =>
       ],
   );
 export function mapsPage(controls = "", settings = "") {
-  return `<section class="maps-page"><header class="maps-heading"><div><span class="eyebrow">ALFRED / SPATIAL</span><h1>Maps</h1></div><div><select id="map-select" aria-label="Saved map"></select><button id="map-new">New map</button></div></header><div class="map-toolbar"><select id="scan-mode" aria-label="Scan mode"><option value="explore">Explore automatically</option><option value="deep">Deep pass · verify all walls</option><option value="manual">Manual capture</option></select><label class="scan-duration"><input id="scan-minutes" type="number" value="10" min="1" max="60" aria-label="Maximum scan minutes"> min</label><button data-scan="start">Start scan</button><button data-scan="pause">Pause</button><button data-scan="resume">Resume</button><button data-scan="locate" title="May move a short distance to find a clearer view">Locate Alfred</button><button data-scan="finish">Finish scan</button><button id="map-emergency">Stop movement</button></div><div class="map-scan-progress" role="status" aria-live="polite"><strong id="map-scan-state">No scan</strong><span id="map-scan-detail">Create or choose a map.</span><small id="map-sensors"></small></div><div class="map-workspace"><div class="map-stage"><div class="map-tools"><button id="map-fit">Fit</button><label><input id="map-vector" type="checkbox" checked> Floor plan</label><label><input id="map-measurements" type="checkbox"> Measurements</label><label><input id="map-dimensions" type="checkbox" checked> Dimensions</label></div><svg id="map-svg" role="group" aria-label="Floor plan, drag to pan or name a section" tabindex="0" viewBox="-5 -5 10 10"></svg><div id="map-plan-empty" class="map-plan-empty" hidden>Building the floor plan from the live scan.</div><div class="map-legend" aria-label="Map legend"><span class="map-key-wall">Likely walls</span><span class="map-key-obstacle">Obstacles</span><span class="map-key-unknown">Unscanned</span><span id="map-deep-legend" hidden>Deep pass: green checked · amber pending · blue current</span></div><div id="map-hint">Create a map to begin.</div></div><aside class="map-inspector">${sectionsMarkup()}<section id="map-manual-controls" hidden>${controls}</section><p id="map-position-status" role="status">Position: waiting</p><label>Map name<input id="map-name" maxlength="80"></label><button id="map-rename">Save name</button><h2>Station</h2><p id="map-station-status" class="map-muted"></p><button data-scan="locate" data-station="true" title="May briefly leave the dock to verify its map position">Locate station</button><button id="map-return-onboard">Return onboard</button><button id="map-return">HQ-guided return (backup)</button><p id="engine-return-status" class="map-muted" role="status"></p><hr><button id="map-svg-export">Export SVG</button><button id="map-png-export">Export PNG</button><hr><label>Plan rotation<input id="map-rotation" type="number" step="1" placeholder="Automatic wall alignment"></label><button id="map-set-rotation">Apply rotation</button><hr><button id="map-delete">Delete map</button></aside></div><p id="map-message" role="status" aria-live="polite"></p>${settings}</section>`;
+  return `<section class="maps-page"><header class="maps-heading"><div><span class="eyebrow">ALFRED / SPATIAL</span><h1>Maps</h1></div><div><select id="map-select" aria-label="Saved map"></select><button id="map-new">New map</button></div></header><div class="map-toolbar"><select id="scan-mode" aria-label="Scan mode"><option value="explore">Explore automatically</option><option value="deep">Deep pass · verify all walls</option><option value="manual">Manual capture</option></select><label class="scan-duration"><input id="scan-minutes" type="number" value="10" min="1" max="60" aria-label="Maximum scan minutes"> min</label><button data-scan="start">Start scan</button><button data-scan="pause">Pause</button><button data-scan="resume">Resume</button><button data-scan="locate" title="May move a short distance to find a clearer view">Locate Alfred</button><button data-scan="finish">Finish scan</button><button id="map-emergency">Stop movement</button></div><div class="map-scan-progress" role="status" aria-live="polite"><strong id="map-scan-state">No scan</strong><span id="map-scan-detail">Create or choose a map.</span><small id="map-sensors"></small></div><div class="map-workspace"><div class="map-stage"><div class="map-tools"><button id="map-fit">Fit</button><label><input id="map-vector" type="checkbox" checked> Floor plan</label><label><input id="map-measurements" type="checkbox"> Measurements</label><label><input id="map-dimensions" type="checkbox" checked> Dimensions</label></div><svg id="map-svg" role="group" aria-label="Floor plan, drag to pan or name a section" tabindex="0" viewBox="-5 -5 10 10"></svg><div id="map-plan-empty" class="map-plan-empty" hidden>Building the floor plan from the live scan.</div><div class="map-legend" aria-label="Map legend"><span class="map-key-wall">Likely walls</span><span class="map-key-obstacle">Obstacles</span><span class="map-key-unknown">Unscanned</span><span id="map-deep-legend" hidden>Deep pass: green checked · amber pending · blue current</span></div><div id="map-hint">Create a map to begin.</div></div><aside class="map-inspector"><div class="inspector-tabs" role="tablist" aria-label="Map controls"><button type="button" role="tab" id="inspector-tab-sections" aria-controls="inspector-sections" aria-selected="true" tabindex="0" data-inspector-tab="sections">Sections</button><button type="button" role="tab" id="inspector-tab-robot" aria-controls="inspector-robot" aria-selected="false" tabindex="-1" data-inspector-tab="robot">Robot</button><button type="button" role="tab" id="inspector-tab-map" aria-controls="inspector-map" aria-selected="false" tabindex="-1" data-inspector-tab="map">Map</button></div><div class="inspector-panel" id="inspector-sections" role="tabpanel" aria-labelledby="inspector-tab-sections" >${sectionsMarkup()}</div><div class="inspector-panel" id="inspector-robot" role="tabpanel" aria-labelledby="inspector-tab-robot" hidden><section id="map-manual-controls" hidden>${controls}</section><p id="map-position-status" role="status">Position: waiting</p><h2>Station</h2><p id="map-station-status" class="map-muted"></p><button data-scan="locate" data-station="true" title="May briefly leave the dock to verify its map position">Locate station</button><button id="map-return-onboard">Return onboard</button><button id="map-return">HQ-guided return (backup)</button><p id="engine-return-status" class="map-muted" role="status"></p></div><div class="inspector-panel" id="inspector-map" role="tabpanel" aria-labelledby="inspector-tab-map" hidden><label>Map name<input id="map-name" maxlength="80"></label><button id="map-rename">Save name</button><hr><button id="map-svg-export">Export SVG</button><button id="map-png-export">Export PNG</button><hr><label>Plan rotation<input id="map-rotation" type="number" step="1" placeholder="Automatic wall alignment"></label><button id="map-set-rotation">Apply rotation</button><hr><button id="map-delete">Delete map</button></div></aside></div><p id="map-message" role="status" aria-live="polite"></p>${settings}</section>`;
 }
 export function mountMaps({stopDrive = ()=>{}} = {}) {
   let alive = true,
@@ -27,7 +27,28 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
     pointer = null;
   const $ = (s) => document.querySelector(s),
     svg = $("#map-svg");
-  const sections = mountSections({getMap:()=>map,render,edit:async body=>{if(busy)throw Error("Wait for the current map update, then save again.");busy=true;try{await edit(body);}finally{busy=false;}},stopDrive});
+  let inspectorTab = "sections";
+  function showInspector(name) {
+    if (name !== inspectorTab) Promise.resolve(stopDrive()).catch(e=>message(e.message));
+    inspectorTab = name;
+    document.querySelectorAll('[data-inspector-tab]').forEach(button=>{
+      const active = button.dataset.inspectorTab === name;
+      button.setAttribute('aria-selected', String(active));
+      button.tabIndex = active ? 0 : -1;
+      $(`#inspector-${button.dataset.inspectorTab}`).hidden = !active;
+    });
+    syncManualControls();
+  }
+  const tabs = [...document.querySelectorAll('[data-inspector-tab]')];
+  tabs.forEach((button,index)=>{
+    button.onclick = ()=>showInspector(button.dataset.inspectorTab);
+    button.onkeydown = event=>{
+      const next = event.key==='ArrowRight' ? (index+1)%tabs.length : event.key==='ArrowLeft' ? (index+tabs.length-1)%tabs.length : event.key==='Home' ? 0 : event.key==='End' ? tabs.length-1 : null;
+      if(next===null)return;
+      event.preventDefault();tabs[next].click();tabs[next].focus();
+    };
+  });
+  const sections = mountSections({onOpen:()=>showInspector('sections'),getMap:()=>map,render,edit:async body=>{if(busy)throw Error("Wait for the current map update, then save again.");busy=true;try{await edit(body);}finally{busy=false;}},stopDrive});
   const message = (s) => {
     if (alive) $("#map-message").textContent = s;
   };
@@ -198,16 +219,17 @@ export function mountMaps({stopDrive = ()=>{}} = {}) {
   }
   function syncManualControls() {
     const panel = $("#map-manual-controls");
-    const hidden = $("#scan-mode").value !== "manual";
+    const hidden = inspectorTab !== "robot" || $("#scan-mode").value !== "manual";
     if (!panel.hidden && hidden) stopDrive().catch(e=>message(e.message));
     panel.hidden = hidden;
   }
-  $("#scan-mode").onchange = syncManualControls;
+  $("#scan-mode").onchange = ()=>{if($("#scan-mode").value === "manual")showInspector("robot");else syncManualControls();};
   $("#map-new").onclick = () =>
     action(async () => {
       const m = await api("", { name: "Untitled map" });
       await list(m.id);
       await load(m.id);
+      showInspector("map");
       $("#map-name").focus();
       $("#map-name").select();
     });
