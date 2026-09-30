@@ -94,6 +94,47 @@ fn can_observe_by_turning(scan: &LidarScan) -> bool {
     }
     count >= 100 && sectors.iter().filter(|s| **s).count() >= 18
 }
+/// Final contact seating uses measured wheel displacement, not noisy map fits.
+/// Small alternating rear pressure, a brief release, and a stationary contact
+/// dwell. Charging confirmation above this controller stops motion immediately.
+struct ContactSeating {
+    started: Instant,
+    origin: Pose,
+    wheels: [f32; 2],
+}
+impl ContactSeating {
+    fn pose(&self, wheels: [f32; 2]) -> Pose {
+        let mut pose = self.origin;
+        pose.advance(
+            (wheels[0] - self.wheels[0]) as f64 / 1000.,
+            (wheels[1] - self.wheels[1]) as f64 / 1000.,
+        );
+        pose
+    }
+    fn command(&self, wheels: [f32; 2], elapsed: f64) -> Option<(f64, f64)> {
+        let left = (wheels[0] - self.wheels[0]) as f64 / 1000.;
+        let right = (wheels[1] - self.wheels[1]) as f64 / 1000.;
+        let yaw = (right - left) / 0.243;
+        let distance = (right + left) / 2.;
+        if elapsed >= 12. || distance.abs() > 0.08 || yaw.abs() > 0.12 {
+            return None;
+        }
+        let cycle = (elapsed / 4.).floor() as usize;
+        let phase = elapsed % 4.;
+        if phase >= 3. {
+            return Some((0., 0.));
+        }
+        if phase >= 2.5 {
+            return Some((0.020, 0.));
+        }
+        let target = [0.035, -0.035, 0.][cycle.min(2)];
+        Some((-0.025, ((target - yaw) * 1.5).clamp(-0.06, 0.06)))
+    }
+}
+fn at_contacts(station: Pose, pose: Pose) -> bool {
+    let p = station.relative(pose);
+    (-0.10..=0.04).contains(&p.x) && p.y.abs() <= 0.05 && p.theta.abs() <= 0.30
+}
 struct Operation {
     status: ReturnStatus,
     started: Instant,
@@ -102,6 +143,7 @@ struct Operation {
     navigator: Navigator,
     detour: bool,
     reseat: bool,
+    seating: Option<ContactSeating>,
     docking: DockController,
     contact: Option<Instant>,
     progress: Option<(Instant, Pose)>,
@@ -125,6 +167,7 @@ impl Default for Operation {
             navigator: Navigator::default(),
             detour: false,
             reseat: false,
+            seating: None,
             docking: DockController::default(),
             contact: None,
             progress: None,
@@ -366,6 +409,51 @@ impl ReturnService {
         op.status.message = reason.into();
         let _ = self.drive.stop().await;
     }
+    async fn seat_contacts(
+        &self,
+        op: &mut Operation,
+        scan: &LidarScan,
+        geometry: &Geometry,
+        wheels: [f32; 2],
+    ) {
+        let seating = op.seating.as_ref().unwrap();
+        let pose = seating.pose(wheels);
+        let command = seating.command(wheels, seating.started.elapsed().as_secs_f64());
+        let Some((v, w)) = command else {
+            op.seating = None;
+            if op.status.retries >= 2 {
+                self.fail(op, "Charging contact not confirmed after contact seating")
+                    .await;
+            } else {
+                op.status.retries += 1;
+                op.reseat = true;
+                op.detour = false;
+                op.navigator.invalidate();
+                let _ = self.drive.stop().await;
+            }
+            return;
+        };
+        op.status.state = "seating-contacts".into();
+        op.status.message = "Gently seating contacts; waiting for charging".into();
+        op.status.pose = Some(pose);
+        if (v != 0. || w != 0.) && obstruction(scan, geometry, pose, v, w, true) {
+            self.hold(op, "Contact seating blocked by an unexpected obstacle")
+                .await;
+            return;
+        }
+        match self
+            .drive
+            .mapping_twist(MappingTwist {
+                linear_mm_s: (v * 1000.) as f32,
+                angular_rad_s: w as f32,
+                wheel_separation_mm: 243.,
+            })
+            .await
+        {
+            Ok(_) => op.lost = None,
+            Err(e) => self.hold(op, &e).await,
+        }
+    }
     async fn tick(&self) {
         let _gate = self.gate.lock().await;
         let mut op = self.operation.lock().await;
@@ -442,6 +530,11 @@ impl ReturnService {
             return;
         }
         let geometry = self.geometry.read().await.clone().unwrap();
+        let wheels = [native.wheels.values[0], native.wheels.values[1]];
+        if op.seating.is_some() {
+            self.seat_contacts(&mut op, &scan, &geometry, wheels).await;
+            return;
+        }
         let location = self.localization.status().await;
         if location.map_id.as_deref() != Some(&geometry.map.map_id) {
             self.fail(&mut op, "Navigation map does not match localization")
@@ -496,6 +589,16 @@ impl ReturnService {
         let pose = op.status.pose.unwrap();
         let station = geometry.map.station;
         let local = station.relative(pose);
+        if op.status.goal.is_none() && !op.reseat && at_contacts(station, pose) {
+            op.seating = Some(ContactSeating {
+                started: Instant::now(),
+                origin: pose,
+                wheels,
+            });
+            op.progress = None;
+            self.seat_contacts(&mut op, &scan, &geometry, wheels).await;
+            return;
+        }
         let Some((scan_pose, points)) = self.localization.navigation_scan(&scan).await else {
             self.hold(&mut op, "Waiting for scan motion alignment")
                 .await;
@@ -871,5 +974,76 @@ mod observation_tests {
         assert!(!can_observe_by_turning(&scan));
         scan.points.truncate(50);
         assert!(!can_observe_by_turning(&scan));
+    }
+}
+
+#[cfg(test)]
+mod seating_tests {
+    use super::*;
+    #[test]
+    fn contact_seating_alternates_gently_and_dwells() {
+        let seat = ContactSeating {
+            started: Instant::now(),
+            origin: Pose::default(),
+            wheels: [0., 0.],
+        };
+        let (v, w) = seat.command([0., 0.], 0.).unwrap();
+        assert_eq!(v, -0.025);
+        assert!(w > 0. && w <= 0.06);
+        assert!(seat.command([0., 0.], 4.).unwrap().1 < 0.);
+        assert_eq!(seat.command([0., 0.], 2.7).unwrap(), (0.020, 0.));
+        assert_eq!(seat.command([0., 0.], 3.5).unwrap(), (0., 0.));
+        assert!(seat.command([0., 0.], 12.).is_none());
+        assert!(seat.command([-81., -81.], 1.).is_none());
+        assert!(seat.command([-20., 20.], 1.).is_none());
+    }
+    #[test]
+    fn seating_begins_at_contacts_after_ramp_and_requires_alignment() {
+        let station = Pose::default();
+        for x in [0.04, 0., -0.068] {
+            assert!(at_contacts(
+                station,
+                Pose {
+                    x,
+                    y: 0.,
+                    theta: 0.07
+                }
+            ));
+        }
+        for pose in [
+            Pose {
+                x: 0.20,
+                y: 0.,
+                theta: 0.,
+            },
+            Pose {
+                x: 0.,
+                y: 0.07,
+                theta: 0.,
+            },
+            Pose {
+                x: 0.,
+                y: 0.,
+                theta: 0.4,
+            },
+        ] {
+            assert!(!at_contacts(station, pose));
+        }
+        let mut controller = DockController::default();
+        assert!(
+            controller
+                .command(
+                    station,
+                    Pose {
+                        x: 0.20,
+                        y: 0.,
+                        theta: 0.
+                    },
+                    false
+                )
+                .1
+                <= -0.10,
+            "slow seating must not reduce ramp climbing speed"
+        );
     }
 }
