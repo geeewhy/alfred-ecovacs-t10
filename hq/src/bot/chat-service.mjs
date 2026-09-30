@@ -1,3 +1,4 @@
+import { directCommand } from './direct-command.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, readFile, writeFile, rename, stat } from 'node:fs/promises';
@@ -19,6 +20,7 @@ export class ChatService {
     this.lastSessionCheck = 0;
     if (options.command) this.command = options.command;
     this.speech = speech;
+    this.direct = options.direct;
     this.sections = options.sections || (async()=>[]);
     this.state = { enabled: false, speaker: false, sessionId: null, agent: 'codex', model: '', sessionLabel: 'Alfred', messages: [], pending: null, error: null };
     this.queue = Promise.resolve();
@@ -40,6 +42,11 @@ export class ChatService {
       this.state.pending.offset = 0;
       this.state.pending.turnId = null;
       this.state.pending.antigravityReader = true;
+    }
+    if(this.state.pending?.direct){
+      this.state.pending=null;
+      this.state.error='HQ restarted during a request. Check robot status before trying again; the command was not resent.';
+      await this.save();
     }
     // Recover legacy truncated Claude envelopes without resending a command.
     const pending = this.state.pending;
@@ -81,9 +88,9 @@ export class ChatService {
   }
   snapshot() {
     const { enabled, speaker, sessionId, agent, model, messages, pending, error } = this.state;
-    return { enabled, speaker, sessionId, agent, model, messages, sessionStatus: enabled ? this.sessionStatus : "off", pending: pending ? { id: pending.id, status: pending.turnId ? 'Alfred is replying…' : 'Waiting for Haicue…' } : null, error };
+    return { transport:this.direct && agent==='antigravity'?'direct':'session', enabled, speaker, sessionId, agent, model, messages, sessionStatus: enabled ? this.sessionStatus : "off", pending: pending ? { id: pending.id, status: pending.turnId ? 'Alfred is replying…' : 'Waiting for Haicue…' } : null, error };
   }
-  async current() { await this.ready; return this.snapshot(); }
+  async current() { await this.ready; if(this.direct && this.state.agent==='antigravity')this.sessionStatus='ready'; return this.snapshot(); }
   settings(input) {
     return this.exclusive(async () => {
       for (const key of ['enabled', 'speaker']) {
@@ -196,7 +203,8 @@ export class ChatService {
       return 'Saved section catalog is unavailable. Do not guess place names or coordinates; fetch /api/maps/sections before answering spatial questions.';
     }
   }
-  send(text) {
+  send(text, options={}) {
+    if(this.direct && this.state.agent==='antigravity')return this.sendDirect(text,options);
     return this.exclusive(async () => {
       if (!this.state.enabled) throw new Error('Turn on chat mode first');
       if (this.state.pending) throw new Error('Wait for Alfred’s reply');
@@ -228,8 +236,60 @@ export class ChatService {
       await this.save(); return this.snapshot();
     });
   }
+  sendDirect(text,{receipt=true}={}) {
+    return this.exclusive(async()=>{
+      if(!this.state.enabled)throw Error('Turn on chat mode first');
+      if(this.state.pending && directCommand(text)?.action!=='stop')throw Error('Wait for Alfred’s reply');
+      if(this.state.pending){
+        const old=this.state.messages.find(m=>m.id===this.state.pending.id);if(old)old.status='cancelled';
+        this.state.pending=null;this.direct.model.close?.();
+      }
+      if(typeof text!=='string'||!text.trim()||text.length>1000)throw Error('Enter 1–1,000 characters');
+      const pending={id:randomUUID(),direct:true,started:Date.now(),turnId:'stream'};
+      this.state.pending=pending;this.state.error=null;this.sessionStatus='ready';
+      this.state.messages.push({id:pending.id,role:'you',text:text.trim(),at:new Date().toISOString(),status:'sent'});
+      await this.save();
+      if(this.state.speaker && receipt)this.direct.click=this.speech.click().catch(()=>{});
+      // Interpretation and engine execution never hold the HTTP/state queue.
+      this.runDirect(pending,text.trim()).catch(error=>this.exclusive(async()=>{
+        if(this.state.pending!==pending)return;
+        this.state.error=error.message;
+        await this.finishReply(pending,error.message);
+      }));
+      return this.snapshot();
+    });
+  }
+  async runDirect(pending,text) {
+    const fast=directCommand(text);
+    const context=fast?{}:await this.direct.commands.context();
+    const history=this.state.messages.slice(-13,-1).map(m=>({role:m.role,text:m.text,operation:m.operation}));
+    let acknowledgment=Promise.resolve(),announced=false;
+    const announce=say=>{
+      if(announced)return;announced=true;
+      acknowledgment=this.exclusive(async()=>{
+        if(this.state.pending!==pending)return;
+        pending.firstReplyMs=Date.now()-pending.started;
+        await this.progressReply(pending,say);
+      });
+    };
+    const intent=fast || await this.direct.model.ask({currentUser:text,history,...context},{model:this.state.model||'gemini-3.6-flash-low',onSay:announce});
+    announce(intent.say);await acknowledgment;
+    if(this.state.pending!==pending)return;
+    // Only a complete, validated intent may execute; streamed text is speech only.
+    pending.executing=true;await this.exclusive(()=>this.save());
+    if(this.state.pending!==pending)return;
+    const operation=await this.direct.commands.execute(intent,()=>this.state.pending===pending);
+    await this.exclusive(async()=>{
+      if(this.state.pending!==pending)return;
+      const reply=this.state.messages.findLast(m=>m.requestId===pending.id);
+      if(reply){delete reply.kind;reply.operation=operation;reply.timing={firstReplyMs:pending.firstReplyMs,modelMs:intent.modelMs,executedMs:Date.now()-pending.started};}
+      this.state.pending=null;this.state.error=null;await this.save();
+    });
+  }
   async poll() {
     const pending = this.state.pending;
+    if(pending?.direct)return;
+    if(!pending && this.direct && this.state.agent==='antigravity'){this.sessionStatus='ready';return;}
     if (!pending) {
       if (this.state.enabled && Date.now() - this.lastSessionCheck >= (this.sessionStatus === 'ready' ? 5000 : 1000)) {
         this.lastSessionCheck = Date.now();
@@ -319,6 +379,8 @@ export class ChatService {
   playReply(reply) {
     // Serialize receipt and result audio; the result must not interrupt receipt.
     this.playback = this.playback.catch(() => {}).then(async () => {
+      if(this.state.messages.find(m=>m.id===reply.requestId)?.status==='cancelled')return;
+      if(this.direct?.click)await this.direct.click;
       const delay = Math.max(0, (this.speech.speakingUntil || 0) - Date.now());
       if (delay) await new Promise(resolve => setTimeout(resolve, delay));
       try { await this.speech.say(reply.text); await this.audioResult(reply.id, 'sent'); }

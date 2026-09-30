@@ -78,5 +78,7 @@ finally:
         service.terminate()
         service.wait()
     for pid in paused:
-        try: os.kill(pid, signal.SIGCONT)
+        try:
+            if not os.path.exists('/data/alfred/firmware/no-stock-voice.enabled'):
+                os.kill(pid, signal.SIGCONT)
         except OSError: pass

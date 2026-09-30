@@ -95,7 +95,7 @@ fn can_observe_by_turning(scan: &LidarScan) -> bool {
     count >= 100 && sectors.iter().filter(|s| **s).count() >= 18
 }
 /// Final contact seating uses measured wheel displacement, not noisy map fits.
-/// Small alternating rear pressure, a brief release, and a stationary contact
+/// Bounded ramp-capable rear pulses, a brief release, and a stationary contact
 /// dwell. Charging confirmation above this controller stops motion immediately.
 struct ContactSeating {
     started: Instant,
@@ -127,8 +127,11 @@ impl ContactSeating {
         if phase >= 2.5 {
             return Some((0.020, 0.));
         }
+        if phase % 1.0 >= 0.6 {
+            return Some((0., 0.));
+        }
         let target = [0.035, -0.035, 0.][cycle.min(2)];
-        Some((-0.025, ((target - yaw) * 1.5).clamp(-0.06, 0.06)))
+        Some((-0.100, ((target - yaw) * 1.5).clamp(-0.06, 0.06)))
     }
 }
 fn at_contacts(station: Pose, pose: Pose) -> bool {
@@ -988,7 +991,9 @@ mod seating_tests {
             wheels: [0., 0.],
         };
         let (v, w) = seat.command([0., 0.], 0.).unwrap();
-        assert_eq!(v, -0.025);
+        assert_eq!(v, -0.100);
+        assert_eq!(seat.command([0., 0.], 0.8).unwrap(), (0., 0.));
+        assert_eq!(seat.command([0., 0.], 1.0).unwrap().0, -0.100);
         assert!(w > 0. && w <= 0.06);
         assert!(seat.command([0., 0.], 4.).unwrap().1 < 0.);
         assert_eq!(seat.command([0., 0.], 2.7).unwrap(), (0.020, 0.));
@@ -1042,7 +1047,7 @@ mod seating_tests {
                     false
                 )
                 .1
-                <= -0.10,
+                <= -0.15,
             "slow seating must not reduce ramp climbing speed"
         );
     }

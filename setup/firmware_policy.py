@@ -10,6 +10,7 @@ import binascii,fcntl,hashlib,json,os,signal,subprocess,sys,time
 TARGET='/usr/lib/node/liberos_node_job_schedule.so'
 ROOT='/data/alfred/firmware'
 FLAG=ROOT+'/no-contact-return-live.enabled'
+VOICE_FLAG=ROOT+'/no-stock-voice.enabled'
 HELPER='/data/alfred/contact-return-patch'
 ORIGINAL='41c8816113c3045e38934cd614b6cf4a304f7717086c31ae637c8ed60a1bf475'
 OFFSET=0x24590
@@ -77,8 +78,24 @@ def apply(action):
             fd=os.open(FLAG,os.O_CREAT|os.O_WRONLY,0o600);os.close(fd)
         elif os.path.exists(FLAG):os.unlink(FLAG)
         return status()
+def suppress_stock_voice():
+    if not os.path.exists(VOICE_FLAG):return []
+    # Stock launcher checks this before respawning. Never stop audioDaemon or
+    # bds_audio_service: Alfred uses those for playback and microphone capture.
+    with open('/tmp/speech_exit.mark','a'):pass
+    stopped=[]
+    for name in os.listdir('/proc'):
+        if not name.isdigit():continue
+        try:
+            command=open('/proc/'+name+'/cmdline','rb').read().split(b'\0')[0]
+            if os.path.basename(command) not in (b'speech_inter_client',b'speech_recognition',b'speech_mute_notify'):continue
+            os.kill(int(name),signal.SIGKILL)
+            stopped.append(int(name))
+        except (IOError,OSError):continue
+    return stopped
+
 def supervise():
-    if not os.path.exists(FLAG):return
+    if not (os.path.exists(FLAG) or os.path.exists(VOICE_FLAG)):return
     if os.fork():return
     os.setsid();signal.signal(signal.SIGHUP,signal.SIG_IGN)
     if os.fork():os._exit(0)
@@ -90,8 +107,10 @@ def supervise():
     except IOError:os._exit(0)
     from rolling_log import append
     previous=None
-    while os.path.exists(FLAG):
-        try:report=json.dumps(apply('boot'),sort_keys=True)
+    while os.path.exists(FLAG) or os.path.exists(VOICE_FLAG):
+        try:
+            suppress_stock_voice()
+            report=json.dumps(apply('boot'),sort_keys=True)
         except Exception as error:report='ERROR '+str(error)
         if report!=previous:append('/data/alfred/logs/firmware-policy.log',report);previous=report
         time.sleep(2)

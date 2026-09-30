@@ -163,3 +163,34 @@ test('idle development session migrates to botchat without changing model or his
     assert.equal(calls.filter(args=>args[1]==='send').length,0);
   } finally {await rm(dir,{recursive:true,force:true});}
 });
+
+test('direct path clicks immediately, streams once, and executes only after validated result', async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'alfred-direct-'));
+ try{
+  const file=path.join(dir,'chat.json');
+  await writeFile(file,JSON.stringify({enabled:true,speaker:true,agent:'antigravity',messages:[]}));
+  const calls=[];let complete,announce;
+  const speech={click:async()=>{calls.push('click');},say:async text=>{calls.push(text);}};
+  const direct={model:{ask:async(input,{onSay})=>{announce=onSay;return new Promise(resolve=>{complete=resolve;});}},commands:{context:async()=>({}),execute:async()=>{calls.push('execute');return {active:true};}}};
+  const service=new ChatService(speech,{file,poll:false,direct});await service.ready;
+  await service.send('Could you take me somewhere quiet?');
+  while(!announce)await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(calls,['click']);
+  announce('Heading to bedroom.');
+  await service.queue;await service.playback;
+  assert.deepEqual(calls,['click','Heading to bedroom.']);
+  complete({say:'Heading to bedroom.',action:'navigate',section:'Bedroom',mapId:'test',modelMs:100});
+  while(service.state.pending)await new Promise(resolve=>setImmediate(resolve));
+  await service.queue;await service.playback;await service.queue;
+  assert.deepEqual(calls,['click','Heading to bedroom.','execute']);
+  assert.equal(service.state.messages.filter(m=>m.role==='alfred').length,1);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('restart never repeats a direct command with uncertain execution',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'alfred-direct-'));
+ try{
+  const file=path.join(dir,'chat.json');await writeFile(file,JSON.stringify({enabled:true,agent:'antigravity',pending:{id:'old',direct:true,executing:true},messages:[]}));
+  const service=new ChatService({}, {file,poll:false,direct:{}});await service.ready;
+  assert.equal(service.state.pending,null);assert.match(service.state.error,/not resent/);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

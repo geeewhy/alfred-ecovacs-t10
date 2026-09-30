@@ -270,7 +270,7 @@ function renderChat() {
   document.querySelector("#microphone-status").textContent = chatState.enabled ? (((chatState.microphone?.message || "Starting robot microphone…") + (chatState.microphone?.status === "listening" && chatState.microphone?.meter ? ` Audio level: ${chatState.microphone.meter.rmsPeak}.` : "") + (chatState.microphone?.transcription && !chatState.microphone.transcription.text ? " No words recognized in the last audio segment." : "")) + (chatState.microphone?.lastHeard ? ` Last heard: “${chatState.microphone.lastHeard.text}”${chatState.microphone.lastHeard.accepted ? "" : " (uncertain audio, skipped)"}` : "")) : "";
   document.querySelector("#chat-speaker").checked = chatState.speaker;
   document.querySelector("#chat-send").disabled = !chatState.enabled || chatState.sessionStatus !== "ready" || !!chatState.pending;
-  document.querySelector("#chat-session-status").textContent = chatState.sessionStatus === "ready" ? `Haicue · ${chatState.agent || "codex"}` : chatState.enabled ? "Connecting Alfred…" : "Haicue · Alfred";
+  document.querySelector("#chat-session-status").textContent = chatState.sessionStatus === "ready" ? `Alfred · ${chatState.agent || "codex"}${chatState.transport === "direct" ? " · Direct" : ""}` : chatState.enabled ? "Connecting Alfred…" : "Haicue · Alfred";
   const pending = chatState.error || chatState.pending?.status || (!chatState.enabled ? "Turn on Chat mode to send messages." : "");
   document.querySelector("#chat-pending").textContent = pending;
   const signature = JSON.stringify(chatState.messages);

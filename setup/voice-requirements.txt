@@ -1,1 +1,3 @@
 mlx-whisper==0.4.3
+vosk==0.3.44
+webrtcvad-wheels==2.0.14

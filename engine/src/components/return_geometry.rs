@@ -804,7 +804,7 @@ impl DockController {
         {
             return (
                 "entering",
-                if robot.x > 0.60 { -0.15 } else { -0.10 },
+                -0.15,
                 (1.2 * (heading + (robot.y * 4.).clamp(-0.15, 0.15))).clamp(-0.12, 0.12),
             );
         }
@@ -925,7 +925,7 @@ mod tests {
                         false
                     )
                     .1,
-                -0.10
+                -0.15
             );
         }
         assert_eq!(

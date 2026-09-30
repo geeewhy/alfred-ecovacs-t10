@@ -1,3 +1,5 @@
+import { IntentModel } from '../bot/intent-model.mjs';
+import { RobotIntents } from '../bot/robot-intents.mjs';
 import { MapService } from '../maps/map-service.mjs';
 import { VoiceService } from "../bot/voice-service.mjs";
 import { ChatService } from "../bot/chat-service.mjs";
@@ -10,7 +12,13 @@ export class HqServer {
     this.config = config;
     this.maps = new MapService(engineClient);
     this.speech = new SpeechService(engineClient);
-    this.chat = new ChatService(this.speech, {sections:()=>this.maps.sectionCatalog()});
+    this.chat = new ChatService(this.speech, {sections:()=>this.maps.sectionCatalog(), direct:{
+      model:new IntentModel(),commands:new RobotIntents(this.maps,engineClient,statusService,async()=>{
+        const task=(async()=>{await engineClient.stop();await this.maps.stopExploration();})();
+        this.driveStopTask=task;
+        try{await task;}finally{if(this.driveStopTask===task)this.driveStopTask=null;}
+      })
+    }});
     this.voice = new VoiceService(this.chat, this.speech);
     this.statusService = statusService;
     this.engineClient = engineClient;

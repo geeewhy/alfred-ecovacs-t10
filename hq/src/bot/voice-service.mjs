@@ -1,4 +1,4 @@
-import { diagnosticState } from "../infra/diagnostics.mjs";
+import { diagnostic, diagnosticState } from "../infra/diagnostics.mjs";
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -6,6 +6,7 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
 export class VoiceService {
   constructor(chat, speech) {
     this.chat = chat; this.speech = speech; this.child = null;
+    this.speech.on?.('activity', () => this.pauseCapture());
     this.state = { status: 'off', message: 'Robot microphone off' };
     this.tick = setInterval(() => this.sync().catch(error => { this.state = { status: 'error', message: error.message }; }), 1000);
     this.tick.unref();
@@ -27,7 +28,7 @@ export class VoiceService {
       try {
         const python = process.env.ALFRED_VOICE_PYTHON || path.join(root, '.venv-voice/bin/python');
         const child = spawn(python, [path.join(root, 'runtime/voice_listener.py')], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
-        this.lastHeard = null; this.meter = null; this.transcription = null; this.workerState = null;
+        this.lastWake = null; this.lastHeard = null; this.meter = null; this.transcription = null; this.workerState = null;
         this.child = child; this.state = { status: 'loading', message: 'Starting robot microphone' };
         const startup = setTimeout(() => {
           this.state = { status: 'error', message: 'Microphone startup exceeded 75 seconds' };
@@ -42,12 +43,20 @@ export class VoiceService {
             if (event.status === 'error') diagnosticState('microphone', 'error', { error: event.message });
             if (event.status === 'listening') diagnosticState('microphone', 'listening');
             if (event.status === 'listening' || event.status === 'error') clearTimeout(startup);
-            if (event.status) { this.workerState = { status: event.status, message: event.message }; this.state = { ...this.workerState, lastHeard: this.lastHeard, meter: this.meter, transcription: this.transcription }; }
+            if (event.status) { this.workerState = { status: event.status, message: event.message }; this.state = { ...this.workerState, lastWake: this.lastWake, lastHeard: this.lastHeard, meter: this.meter, transcription: this.transcription }; }
             if (event.meter) { this.meter = event.meter; this.state = { ...this.state, meter: this.meter }; }
             if (event.transcription) { this.transcription = event.transcription; this.state = { ...this.state, transcription: this.transcription }; }
             if (event.heard) {
               this.lastHeard = { text: event.heard, accepted: event.accepted, at: new Date().toISOString() };
-              this.state = { ...this.state, lastHeard: this.lastHeard, meter: this.meter, transcription: this.transcription };
+              this.state = { ...this.state, lastWake: this.lastWake, lastHeard: this.lastHeard, meter: this.meter, transcription: this.transcription };
+            }
+            if (event.wake) {
+              this.lastWake=new Date().toISOString();
+              this.state={...this.state,lastWake:this.lastWake};
+              void diagnostic("voice-wake",{at:this.lastWake});
+              this.speech.click({wake:true}).catch(error => {
+              this.state = {...this.state, message:'Wake detected; blip failed: '+error.message};
+              });
             }
             if (event.text) this.submit(event.text);
           }
@@ -74,13 +83,16 @@ export class VoiceService {
       }
       if (this.child?.stdin.writable) this.child.stdin.write(JSON.stringify({ paused, vocabulary:this.vocabulary || [] }) + '\n');
       if (paused) this.state = { status: 'paused', message: preparing ? (state.error || 'Connecting Alfred’s chat session…') : 'Listening paused while Alfred replies' };
-      else if (this.state.status === 'paused') this.state = { ...(this.workerState || { status: 'listening', message: 'Listening. Speak to Alfred.' }), lastHeard: this.lastHeard, meter: this.meter, transcription: this.transcription };
+      else if (this.state.status === 'paused') this.state = { ...(this.workerState || { status: 'listening', message: 'Listening. Start with Alfred.' }), lastWake: this.lastWake, lastHeard: this.lastHeard, meter: this.meter, transcription: this.transcription };
     }
+  }
+  pauseCapture() {
+    if (this.child?.stdin.writable) this.child.stdin.write(JSON.stringify({paused:true}) + "\n");
   }
   async submit(text) {
     const state = await this.chat.current();
     if (!state.enabled || state.sessionStatus !== 'ready' || state.pending || this.speech.busy || Date.now() < (this.speech.speakingUntil || 0)) return;
-    try { await this.chat.send(text); }
+    try { this.pauseCapture(); await this.chat.send(text, {receipt:false}); }
     catch (error) { this.state = { status: 'error', message: error.message }; }
   }
   reset() { if (this.state.status === 'error') this.state = { status: 'off', message: 'Starting robot microphone' }; }

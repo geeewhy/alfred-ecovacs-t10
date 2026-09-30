@@ -8,7 +8,7 @@ case "$MODE" in
 esac
 # Reapply the opt-in, reversible contact-loss policy to each firmware process.
 # This never restarts firmware and does not depend on HQ or the engine.
-if [ -f /data/alfred/firmware/no-contact-return-live.enabled ]; then
+if [ -f /data/alfred/firmware/no-contact-return-live.enabled ] || [ -f /data/alfred/firmware/no-stock-voice.enabled ]; then
     python /data/alfred/firmware_policy.py supervise
 fi
 if [ -f /data/alfred/startup-sound.sh ]; then

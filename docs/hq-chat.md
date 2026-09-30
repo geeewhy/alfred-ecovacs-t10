@@ -1,3 +1,15 @@
+## Direct Antigravity voice/chat path
+
+Antigravity now uses a persistent `agy --input-format stream-json --output-format stream-json` process with the installed `alfred` interpreter. Install its configuration with `agy plugin install hq/botchat`; it is versioned in `hq/botchat/agents/alfred.md`. The official client owns authentication. `ALFRED_AGY_BIN` overrides its binary. The process is recycled after 24 turns; HQ supplies the latest 12 conversation messages plus fresh compact section and robot status context. Other selected agents retain the session transport below.
+
+HQ plays the bundled 70ms soft receipt click immediately on accepted input (when speaker output is enabled). The model emits JSON with `say` first, followed by `action`, `section`, and `mapId`. Once the complete acknowledgment string arrives it is displayed and queued for speech; only a complete validated final intent may execute. The interpreter has no configured coding tools, and any emitted tool step fails the request. CLI init metadata in installed v1.2.13 still enumerates the global tool inventory; it is not treated as the effective agent tool list.
+
+Allowed commands are conversation/status, stop, navigate to a named section, and onboard return. HQ resolves sections freshly and executes existing service methods directly, without shell commands, request-file reads, or transcript polling. Unsupported/ambiguous requests ask for clarification. Acknowledgment is not completion. Execution results and timings are stored on the reply; failure is surfaced and spoken. A restart during a pending request clears it with an uncertainty notice and never repeats physical actions. Spoken acknowledgment is not repeated as a final response. The receipt click is serialized before spoken acknowledgment; speech cooldown uses measured clip duration plus 250ms rather than character-count estimates.
+
+Verification: 14 chat/intent tests passed, including no early execution, one acknowledgment, fresh section resolution, ambiguity rejection and no replay on restart. Real-model dry run: warm Bedroom intent acknowledgment1.13s, final intent1.21s; negated Bedroom instruction produced no movement. Live non-moving HQ greeting: acknowledgment3.125s, completion3.202s including cold model start; reply audio accepted by robot. These are observed timings, not guarantees. No movement was triggered in these implementation tests.
+
+References: https://www.antigravity.google/docs/cli/headless/ and https://www.antigravity.google/docs/subagents/.
+
 # Alfred in HQ
 
 HQ sends user text to the dedicated Haicue session (Codex by default) using `hai session send`. Final replies are correlated by the request marker and Haicue turn ID from the transcript returned by `hai session inspect`. Personality lives in `hq/alfred-personality.md` and is included with every request, including after agent/model changes. HQ stores only its own conversation in `artifacts/hq/chat.json`. It displays final answers and optionally speaks them using the saved voice; never duplicate speech from the session.
@@ -10,7 +22,7 @@ Chat settings: GET/PUT `/api/bots/alfred/chat/settings` with `enabled`, `speaker
 
 Chat mode uses the robot microphone, local Whisper on the Mac, then Haicue. No wake name is required. Settings selects the Haicue agent/model; History includes speaker output. Native English recognition uses Ecovacs cloud, not a verified offline transcription API.
 
-Microphone transport: `runtime/robot_mic_server.py` calls the firmware TalkClient SDK directly for mono 16 kHz PCM. It pauses `speech_inter_client` while recording: both processes otherwise read `/dev/spidev1.0` and corrupt capture. The stock `audio_record` drops alternate samples; do not treat its output as 16 kHz. The bridge restores the stock assistant on disconnect and shutdown. `runtime/robot_mic.py` reads authenticated HTTP PCM from engine `/v1/audio/microphone`; there is no ADB invocation or port forwarding in microphone startup. The Rust engine embeds and owns the existing firmware Python DSP adapter, with a single capture lease, startup/read timeouts and SIGTERM cleanup on HTTP disconnect. SDK diagnostics are separated from the PCM pipe. The DSP adapter remains Python; transcription remains local Whisper on HQ. ADB is needed only to install this engine version, not to operate the microphone.
+Microphone transport: `runtime/robot_mic_server.py` calls the firmware TalkClient SDK directly for mono 16 kHz PCM. It pauses `speech_inter_client` while recording: both processes otherwise read `/dev/spidev1.0` and corrupt capture. The stock `audio_record` drops alternate samples; do not treat its output as 16 kHz. The persistent `/data/alfred/firmware/no-stock-voice.enabled` policy disables the stock assistant and its muted-assistant announcement loop. The firmware policy supervisor stops only `speech_inter_client`, `speech_recognition`, and `speech_mute_notify`, sets the stock launcher exit marker, and reapplies after boot/restarts. It leaves `audioDaemon` and Alfred’s `bds_audio_service` intact. The bridge only resumes the stock assistant when this policy is absent. Remove the flag to opt out; restarting stock speech also resets the DSP and must not overlap Alfred microphone capture. `runtime/robot_mic.py` reads authenticated HTTP PCM from engine `/v1/audio/microphone`; there is no ADB invocation or port forwarding in microphone startup. The Rust engine embeds and owns the existing firmware Python DSP adapter, with a single capture lease, startup/read timeouts and SIGTERM cleanup on HTTP disconnect. SDK diagnostics are separated from the PCM pipe. The DSP adapter remains Python; transcription remains local Whisper on HQ. ADB is needed only to install this engine version, not to operate the microphone.
 
 Voice/chat command timeouts are at most 15 seconds, polling is 1 second. After 15 seconds without a Haicue reply, HQ reports the delay but retains request correlation; it never resends robot commands automatically. Last transcription and audio levels are exposed in microphone status. Verified through robot mic → Whisper → Haicue → reply → robot playback acknowledgement; recognition can still mishear words.
 
@@ -60,3 +72,43 @@ Microphone HTTP failures now include the engine response body. Engine capture cl
 M4 Pro local generated-speech smoke check: “Alfred, go to the study room, then return to the charging station.” transcribed correctly, 3.55 seconds cold / 0.55 seconds warm. This is not a real-room accuracy benchmark. Capture recovery deployed as engine MD5 `7acc865abc103c7181adf5abe3575150`.
 
 Live microphone verification subsequently recognized “Alfred, can you hear me?” in 0.511 seconds (3.01-second captured utterance). Prompted digital silence produced repetitive text despite passing the old confidence gate; compression-ratio rejection (<2.4) now blocks that case, verified at ratio22.4. Energy gating still precedes inference.
+
+### Local wake word
+
+Say **Alfred**, wait for the soft blip, then speak one request. An eight-second
+window expires silently if no request follows. Continuous “Alfred, …” is also
+supported. Each new request needs a wake; typing in chat does not.
+
+HQ runs Vosk's small English model with a fixed Alfred/unknown-word grammar on the
+robot's authenticated microphone stream. Only an awakened utterance reaches
+MLX Whisper and then chat. There is no LLM wake decision or cloud wake service.
+Install `setup/voice-requirements.txt`, then `sh setup/install-wake-model.sh`.
+The model is checksum-pinned. Bounded speech segments use a noise-relative energy
+threshold and capped gain/headroom normalization before keyword recognition.
+An unknown-word path competes with Alfred; confidence, word duration, and
+repeated partial matches gate activation. Room audio is not sent to a chat model.
+Reference: https://alphacephei.com/vosk/models
+
+Microphone transport drains continuously during transcription and playback.
+Playback immediately pauses recognition; capture epochs invalidate queued and
+in-flight utterances across pause/resume, with a 650ms playback tail. Silence
+alone after a wake never invokes Whisper. The wake blip does not close the
+request window, and voice requests don't produce a second receipt click.
+This is playback suppression, not acoustic speaker identification: another
+person or a recording saying Alfred can still wake it. Synthetic audio checks
+are not a substitute for room/microphone testing.
+
+Live microphone HTTP chunks are reassembled into 2048-byte PCM frames before
+recognition. Odd-sized reads must never be truncated: one discarded byte changes
+the sample alignment. The microphone meter reports reads, oddReads, and droppedFrames.
+The direct model request has a 45-second deadline; timeout never resends a command.
+
+Command endpointing uses WebRTC VAD (20ms frames, mode2) and submits after
+100 consecutive non-speech frames: two seconds. Speech resumes reset that timer.
+Quiet PCM is boosted only for VAD classification; Whisper receives original audio.
+The eight-second wake window limits waiting for a request to start; started
+speech can continue, with a30-second recording cap. Transcription diagnostics
+include endpointSilenceSeconds and endpoint=webrtc-vad. WebRTC's own speech
+hangover may add a short tail before the two-second non-speech interval.
+
+Direct command grammar: `stop`, `return to station` (also dock/go back), and `go to <section>` bypass the model and telemetry context fetch. Whole-utterance commands accept Alfred/please and punctuation; other speech uses Antigravity. Section resolution still uses the live map catalog and rejects ambiguity. Stop cancels a pending model turn; cancelled resolution cannot initiate movement. Timing records report modelMs=0. Voice still requires wake detection, VAD endpoint and transcription; microphone capture remains suppressed during playback/pending replies.
