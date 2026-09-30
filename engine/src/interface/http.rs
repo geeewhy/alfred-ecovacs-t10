@@ -28,6 +28,7 @@ const MAX_CLIP_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct HttpState {
+    microphone: Arc<crate::components::microphone::Microphone>,
     localization: Arc<LocalizationService>,
     reference: Arc<tokio::sync::RwLock<Option<Arc<EvidenceMap>>>>,
     reflectance: Arc<ReflectanceService>,
@@ -102,6 +103,7 @@ impl HttpRuntime {
         )
         .await;
         let state = HttpState {
+            microphone: Arc::new(crate::components::microphone::Microphone::new()),
             localization,
             reference: Arc::new(tokio::sync::RwLock::new(None)),
             reflectance,
@@ -155,6 +157,7 @@ impl HttpRuntime {
             .route("/v1/drive/stop", post(stop_drive))
             .route("/v1/drive/wake", post(wake_drive))
             .route("/v1/audio/play", post(play))
+            .route("/v1/audio/microphone", get(microphone))
             .route("/v1/audio/stock/{number}", post(stock))
             .route("/v1/audio/volume/{percent}", put(volume))
             .layer(DefaultBodyLimit::max(MAX_CLIP_BYTES))
@@ -880,4 +883,11 @@ async fn localization_start(
             .await
             .map(|_| "Engine localization started".into()),
     )
+}
+
+async fn microphone(State(state): State<HttpState>) -> axum::response::Response {
+    match state.microphone.stream().await {
+        Ok(body) => ([("content-type", "application/octet-stream"), ("cache-control", "no-store"), ("x-audio-format", "s16le;rate=16000;channels=1")], body).into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+    }
 }

@@ -5,18 +5,25 @@ Uses the same TalkClient as audio_record, retaining all mono samples. The stock
 recorder incorrectly selects every other sample on this firmware. Holds sole
 DSP ownership only while a host is connected; restores the assistant on exit.
 """
-import ctypes, os, signal, socket, subprocess, time
+import ctypes, os, signal, socket, subprocess, time, sys, fcntl
+stdio = "--stdio" in sys.argv
+audio_fd = os.dup(1) if stdio else None
+if stdio: os.dup2(2, 1) # Keep SDK diagnostics out of PCM.
 
 def terminate(signum, frame):
     raise SystemExit(0)
 
 signal.signal(signal.SIGTERM, terminate)
 signal.signal(signal.SIGINT, terminate)
-listener = socket.socket()
-listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-listener.bind(('127.0.0.1', 8082))
-listener.listen(1)
-listener.settimeout(5)
+lock = open('/tmp/alfred-microphone.lock', 'w')
+fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+listener = None
+if not stdio:
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(('127.0.0.1', 8082))
+    listener.listen(1)
+    listener.settimeout(5)
 paused = []
 service = None
 client = None
@@ -47,19 +54,24 @@ try:
     start.argtypes = stop.argtypes = [ctypes.c_void_p]
     read.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
     start(instance)
-    client, address = listener.accept()
-    client.settimeout(3)
-    if client.recv(16) != b'record':
-        raise RuntimeError('Invalid recording request')
+    if not stdio:
+        client, address = listener.accept()
+        client.settimeout(3)
+        if client.recv(16) != b'record':
+            raise RuntimeError('Invalid recording request')
     buffer = ctypes.create_string_buffer(2048)
     while True:
         # The native read returns zero on success and fills the requested bytes.
         if read(instance, buffer, len(buffer)) < 0:
             raise RuntimeError('Firmware microphone read failed')
-        client.sendall(buffer.raw)
+        if stdio:
+            data = buffer.raw
+            while data:
+                data = data[os.write(audio_fd, data):]
+        else: client.sendall(buffer.raw)
 finally:
     if client: client.close()
-    listener.close()
+    if listener: listener.close()
     if instance:
         stop(instance)
     if service:
