@@ -41,3 +41,65 @@ test('disabled chat does not create a session', async () => {
     assert.equal(service.snapshot().sessionStatus, 'off');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('large tool output cannot strand a completed reply or replay it after restart', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'alfred-chat-'));
+  try {
+    const file = path.join(dir, 'chat.json'), transcript = path.join(dir, 'transcript.jsonl');
+    const final = JSON.stringify({type:'response_item',payload:{type:'message',role:'assistant',phase:'final_answer',content:[{type:'output_text',text:'Ready.'}],internal_chat_message_metadata_passthrough:{turn_id:'turn'}}});
+    await writeFile(transcript, JSON.stringify({type:'response_item',payload:{type:'custom_tool_call_output',output:'x'.repeat(1207630)}})+'\n'+final+'\n');
+    await writeFile(file, JSON.stringify({enabled:true,pending:{id:'request',path:transcript,offset:0,agent:'codex',turnId:'turn',started:Date.now()-30000},messages:[]}));
+    const service = new ChatService({}, {file,poll:false});
+    await service.exclusive(()=>service.poll());
+    assert.equal(service.state.pending,null);
+    assert.equal(service.state.error,null);
+    assert.equal(service.state.messages[0].text,'Ready.');
+    const restored = new ChatService({}, {file,poll:false});
+    await restored.ready;
+    assert.equal(restored.state.pending,null);
+    assert.equal(restored.state.messages.length,1);
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+test('partial transcript records are retried intact, including Unicode', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'alfred-chat-'));
+  try {
+    const file=path.join(dir,'chat.json'), transcript=path.join(dir,'transcript.jsonl');
+    const line=JSON.stringify({type:'response_item',payload:{type:'message',role:'assistant',phase:'final_answer',content:[{type:'output_text',text:'Prêt.'}],internal_chat_message_metadata_passthrough:{turn_id:'turn'}}});
+    await writeFile(transcript,line);
+    await writeFile(file,JSON.stringify({pending:{id:'r',path:transcript,offset:0,agent:'codex',turnId:'turn',started:Date.now()},messages:[]}));
+    const service=new ChatService({}, {file,poll:false});
+    await service.exclusive(()=>service.poll());
+    assert.equal(service.state.pending.offset,0);
+    await writeFile(transcript,line+'\n');
+    await service.exclusive(()=>service.poll());
+    assert.equal(service.state.pending,null);
+    assert.equal(service.state.messages[0].text,'Prêt.');
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+test('acceptance acknowledges before delivery and serializes receipt/result playback', async () => {
+  const dir=await mkdtemp(path.join(tmpdir(),'alfred-chat-'));
+  try {
+    const file=path.join(dir,'chat.json'), transcript=path.join(dir,'transcript.jsonl');
+    await writeFile(transcript,'');
+    const spoken=[];
+    let release;
+    const speech={say:async text=>{spoken.push(text);if(text==='Received.')await new Promise(resolve=>{release=resolve;});}};
+    const service=new ChatService(speech,{file,poll:false,command:async args=>{
+      if(args[1]==='send')assert.equal(service.state.messages.at(-1).text,'Received.');
+      return {};
+    }});
+    await service.ready;
+    service.state.enabled=true;service.state.speaker=true;
+    service.session=async()=>({id:'session',transcript_path:transcript});
+    await service.send('Hello');
+    assert.equal(service.state.messages[1].kind,'acknowledgment');
+    await service.exclusive(()=>service.finishReply(service.state.pending,'Ready.'));
+    assert.deepEqual(spoken,['Received.']);
+    release();await service.playback;
+    assert.deepEqual(spoken,['Received.','Ready.']);
+    assert.equal(service.state.messages[1].audio,'sent');
+    assert.equal(service.state.messages[2].audio,'sent');
+  } finally {await rm(dir,{recursive:true,force:true});}
+});

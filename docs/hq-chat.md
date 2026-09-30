@@ -26,3 +26,19 @@ Every HQ chat request includes a fresh compact catalog of saved section names, a
 - `ambiguous` returns the competing matches. Ask which map/section the user means. `not-found` means ask for the intended saved name or explain how to name a section in Maps. `changed` means reread the catalog. Never invent coordinates or silently select a similarly named place.
 
 Only after explicit movement intent, resolve the name again and use the existing `POST /api/maps/{mapId}/navigate` with the resolved target `{x,y,theta}`. Verify native navigation status via `GET /api/maps/engine-return`; active navigation is not arrival. Do not claim room cleaning from a point-navigation operation. Naming, describing or mentioning a section does not authorize movement. A null target is not navigable through this interface. Resolve again after edits; do not cache coordinates in conversation memory.
+
+## Command receipt and compact responses
+
+HQ immediately displays “Received.” for an accepted request and speaks it when speaker output is enabled. This acknowledges receipt, not execution or success. The agent supplies the verified result separately. Receipt and result playback are serialized. Historical acknowledgments are never replayed.
+
+For return to station use POST `/api/maps/{mapId}/return-onboard`, then GET `/api/maps/engine-return`. The `/return` route is the HQ-guided backup. Report an active operation as “Returning.”; only report docking after fresh charging verification. Do not interpret an active return as failure just because charging has not started yet.
+
+Map mutation responses can contain the entire map, including thousands of polygon vertices. Parse HTTP JSON locally and print only the fields needed (ok/error and compact operation status). Never dump full map geometry to the transcript. For example:
+
+```js
+const r = await fetch(url, {method: 'POST'});
+const data = await r.json();
+console.log(JSON.stringify({ok: data.ok, error: data.error}));
+```
+
+Transcript polling streams complete JSONL records, including records larger than 1 MB. Partial trailing records remain unread until complete.

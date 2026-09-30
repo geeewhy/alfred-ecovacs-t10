@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, writeFile, rename, stat, open } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const file = path.join(root, 'artifacts/hq/chat.json');
@@ -20,6 +22,7 @@ export class ChatService {
     this.sections = options.sections || (async()=>[]);
     this.state = { enabled: false, speaker: false, sessionId: null, agent: 'codex', model: '', sessionLabel: 'Alfred', messages: [], pending: null, error: null };
     this.queue = Promise.resolve();
+    this.playback = Promise.resolve();
     this.ready = this.load();
     if (options.poll !== false) {
       this.timer = setInterval(() => {
@@ -174,8 +177,11 @@ export class ChatService {
       this.state.messages.push(message);
       this.state.error = null;
       this.state.pending = { id, path: session.transcript_path, offset: (await stat(session.transcript_path)).size, agent: this.state.agent, turnId: null, started: Date.now() };
+      const acknowledgment = { id: randomUUID(), requestId: id, role: 'alfred', text: 'Received.', at: new Date().toISOString(), kind: 'acknowledgment', audio: this.state.speaker ? 'sending' : 'off' };
+      this.state.messages.push(acknowledgment);
       await this.save();
-      const prompt = `[HQ_ALFRED_REQUEST:${id}]\nYou are Alfred, the user's Ecovacs robot, replying through HQ Cockpit.\n\n${personality}\n\n${spatial}\n\nTreat the text below as the user's request. Use plain text suitable for speech. Operational replies: keywords only, usually 2–6 words. List requested sections by name only. Explain only when asked. HQ displays your final answer and handles optional speaker playback, so do not call speech yourself. For robot questions or explicitly requested robot actions use the existing tooling in ${root}; read ${root}/docs/hq-chat.md for the interface. Do not move the robot unless this message requests movement. Do not change project code for ordinary chat. Never claim an action succeeded without checking its result.\n\nUser: ${message.text}`;
+      if (acknowledgment.audio === 'sending') this.playReply(acknowledgment);
+      const prompt = `[HQ_ALFRED_REQUEST:${id}]\nYou are Alfred, the user's Ecovacs robot, replying through HQ Cockpit.\n\n${personality}\n\n${spatial}\n\nTreat the text below as the user's request. Use plain text suitable for speech. Operational replies: keywords only, usually 2–6 words. List requested sections by name only. Explain only when asked. HQ already acknowledged receipt with “Received.” Display the actual result in your final answer; do not repeat the acknowledgment. HQ handles speaker playback, so do not call speech yourself. For robot questions or explicitly requested robot actions use the existing tooling in ${root}; read ${root}/docs/hq-chat.md for the interface. Do not move the robot unless this message requests movement. Do not change project code for ordinary chat. Never claim an action succeeded without checking its result.\n\nUser: ${message.text}`;
       try {
         await this.command(['session', 'send', session.id, prompt]);
         message.status = 'sent';
@@ -201,19 +207,18 @@ export class ChatService {
       this.state.error = 'No reply within 15 seconds. The Haicue request is still tracked; it will not be resent.';
       await this.save();
     }
-    const handle = await open(pending.path, 'r');
-    let data;
+    const size = (await stat(pending.path)).size;
+    if (size < pending.offset) throw new Error('Haicue transcript changed; pending reply cannot be matched');
+    if (size === pending.offset) return;
+    // Stream complete records, including tool outputs larger than a read chunk.
+    // Keep an unfinished final record at its original offset for the next poll.
+    const stream = createReadStream(pending.path, { start: pending.offset, end: size - 1 });
+    const records = createInterface({ input: stream, crlfDelay: Infinity });
     try {
-      const size = (await handle.stat()).size;
-      if (size < pending.offset) throw new Error('Haicue transcript changed; pending reply cannot be matched');
-      const buffer = Buffer.alloc(Math.min(size - pending.offset, 1024 * 1024));
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, pending.offset);
-      const end = buffer.subarray(0, bytesRead).lastIndexOf(10);
-      if (end < 0) return;
-      data = buffer.subarray(0, end + 1).toString('utf8');
-      pending.offset += end + 1;
-    } finally { await handle.close(); }
-    for (const line of data.split('\n')) {
+    for await (const line of records) {
+      const bytes = Buffer.byteLength(line) + 1;
+      if (pending.offset + bytes > size) break;
+      pending.offset += bytes;
       if (!line) continue;
       let record; try { record = JSON.parse(line); } catch { continue; }
       if (pending.agent === 'claude') {
@@ -239,6 +244,7 @@ export class ChatService {
         return;
       }
     }
+    } finally { records.close(); stream.destroy(); }
     await this.save();
   }
   async finishReply(pending, text) {
@@ -249,8 +255,17 @@ export class ChatService {
         await this.save();
         if (reply.audio === 'sending') {
           // Persist before playback: restarts never replay historical replies.
-          this.speech.say(text).then(() => this.audioResult(reply.id, 'sent')).catch(error => this.audioResult(reply.id, 'failed', error.message));
+          this.playReply(reply);
         }
+  }
+  playReply(reply) {
+    // Serialize receipt and result audio; the result must not interrupt receipt.
+    this.playback = this.playback.catch(() => {}).then(async () => {
+      const delay = Math.max(0, (this.speech.speakingUntil || 0) - Date.now());
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+      try { await this.speech.say(reply.text); await this.audioResult(reply.id, 'sent'); }
+      catch (error) { await this.audioResult(reply.id, 'failed', error.message); }
+    });
   }
   audioResult(id, audio, error) {
     return this.exclusive(async () => {
