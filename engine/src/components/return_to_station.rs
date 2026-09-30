@@ -51,6 +51,49 @@ impl Default for ReturnStatus {
         }
     }
 }
+struct LocalizationSweep {
+    started: Instant,
+    wheels: [f32; 2],
+    phase: usize,
+    settled: Option<Instant>,
+}
+impl LocalizationSweep {
+    fn command(&mut self, wheels: [f32; 2]) -> f64 {
+        let yaw = ((wheels[1] - self.wheels[1]) - (wheels[0] - self.wheels[0])) as f64 / 243.;
+        let target = [0.45, -0.45, 0.][self.phase.min(2)];
+        let error = target - yaw;
+        if error.abs() < 0.045 {
+            let at = self.settled.get_or_insert_with(Instant::now);
+            if at.elapsed() > Duration::from_secs(5) && self.phase < 2 {
+                self.phase += 1;
+                self.settled = None;
+            }
+            0.
+        } else {
+            self.settled = None;
+            (error * 1.5).clamp(-0.30, 0.30)
+        }
+    }
+}
+// Rotation requires an observed clear circular footprint, independent of the
+// uncertain map pose. Existing contact/cliff/lift/freshness checks run first.
+fn can_observe_by_turning(scan: &LidarScan) -> bool {
+    let mut sectors = [false; 24];
+    let mut count = 0;
+    for p in &scan.points {
+        let r = (p.x as f64).hypot(p.y as f64) / 1000.;
+        if p.power <= 0. || r < 0.06 {
+            continue;
+        }
+        if r < 0.205 {
+            return false;
+        }
+        count += 1;
+        let angle = (p.y as f64).atan2(p.x as f64) + std::f64::consts::PI;
+        sectors[(angle / std::f64::consts::TAU * 24.) as usize % 24] = true;
+    }
+    count >= 100 && sectors.iter().filter(|s| **s).count() >= 18
+}
 struct Operation {
     status: ReturnStatus,
     started: Instant,
@@ -62,6 +105,7 @@ struct Operation {
     docking: DockController,
     contact: Option<Instant>,
     progress: Option<(Instant, Pose)>,
+    localization_sweep: Option<LocalizationSweep>,
     boot: String,
 }
 impl Operation {
@@ -84,6 +128,7 @@ impl Default for Operation {
             docking: DockController::default(),
             contact: None,
             progress: None,
+            localization_sweep: None,
             boot: String::new(),
         }
     }
@@ -398,15 +443,53 @@ impl ReturnService {
         }
         let geometry = self.geometry.read().await.clone().unwrap();
         let location = self.localization.status().await;
-        if location.map_id.as_deref() != Some(&geometry.map.map_id)
-            || location.state != "located"
-            || location.pose.is_none()
-        {
+        if location.map_id.as_deref() != Some(&geometry.map.map_id) {
+            self.fail(&mut op, "Navigation map does not match localization")
+                .await;
+            return;
+        }
+        if location.state != "located" || location.pose.is_none() {
             op.status.state = "locating".into();
             op.status.pose = None;
-            op.status.message = location.message;
-            let _ = self.drive.stop().await;
+            let sweep = op
+                .localization_sweep
+                .get_or_insert_with(|| LocalizationSweep {
+                    started: Instant::now(),
+                    wheels: [native.wheels.values[0], native.wheels.values[1]],
+                    phase: 0,
+                    settled: None,
+                });
+            if sweep.started.elapsed() > Duration::from_secs(40) {
+                self.fail(
+                    &mut op,
+                    "Localization recovery could not verify a position from new views",
+                )
+                .await;
+                return;
+            }
+            if sweep.started.elapsed() < Duration::from_secs(2) || !can_observe_by_turning(&scan) {
+                op.status.message = location.message;
+                let _ = self.drive.stop().await;
+            } else {
+                let w = sweep.command([native.wheels.values[0], native.wheels.values[1]]);
+                op.status.message = "Checking position from new viewing angles".into();
+                if let Err(e) = self
+                    .drive
+                    .mapping_twist(MappingTwist {
+                        linear_mm_s: 0.,
+                        angular_rad_s: w as f32,
+                        wheel_separation_mm: 243.,
+                    })
+                    .await
+                {
+                    self.hold(&mut op, &e).await;
+                }
+            }
             return;
+        }
+        if op.localization_sweep.take().is_some() {
+            op.navigator.invalidate();
+            op.progress = None;
         }
         op.status.pose = location.pose;
         op.status.score = location.score;
@@ -748,5 +831,45 @@ mod tests {
             ..Default::default()
         };
         assert!(!obstructed(&scan, &g, pose, -0.1, 0.));
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn sweep_uses_encoder_angle_and_stops_at_each_view() {
+        let mut sweep = LocalizationSweep {
+            started: Instant::now(),
+            wheels: [0., 0.],
+            phase: 0,
+            settled: None,
+        };
+        assert!(sweep.command([0., 0.]) > 0.);
+        assert_eq!(sweep.command([-54.675, 54.675]), 0.);
+        sweep.settled = Some(Instant::now() - Duration::from_secs(6));
+        assert_eq!(sweep.command([-54.675, 54.675]), 0.);
+        assert!(sweep.command([-54.675, 54.675]) < 0.);
+    }
+    #[test]
+    fn observation_turn_requires_clear_footprint_and_scan_coverage() {
+        let mut scan = LidarScan {
+            points: (0..360)
+                .map(|i| {
+                    let a = i as f32 * std::f32::consts::TAU / 360.;
+                    super::super::lidar::LidarPoint {
+                        x: a.cos() * 1000.,
+                        y: a.sin() * 1000.,
+                        power: 1.,
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        };
+        assert!(can_observe_by_turning(&scan));
+        scan.points[0].x = 180.;
+        assert!(!can_observe_by_turning(&scan));
+        scan.points.truncate(50);
+        assert!(!can_observe_by_turning(&scan));
     }
 }

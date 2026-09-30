@@ -231,6 +231,84 @@ impl ScanMatcher {
         modes.truncate(8);
         modes
     }
+    /// Recovery searches the complete odometry-bounded neighborhood. Tracking's
+    /// tight quadratic prior must not prevent scan evidence correcting drift.
+    /// Constrain candidates BEFORE ranking so distant map aliases cannot crowd
+    /// the reachable solution out of the shortlist.
+    pub fn recover(
+        &self,
+        origin: Pose,
+        translation: f64,
+        rotation: f64,
+        points: &[[f64; 2]],
+        evidence: &EvidenceMap,
+        reflections: Option<&Boundaries>,
+    ) -> Vec<Hypothesis> {
+        if points.len() < 100 {
+            return vec![];
+        }
+        let allowed = |p: Pose| {
+            p.distance(origin) <= translation && wrap(p.theta - origin.theta).abs() <= rotation
+        };
+        let sparse: Vec<_> = points
+            .iter()
+            .step_by((points.len() / 120).max(1))
+            .copied()
+            .collect();
+        let n = (translation / 0.05).ceil() as i32;
+        let a = (rotation / 0.05).ceil() as i32;
+        let mut candidates = Vec::new();
+        for da in -a..=a {
+            for dy in -n..=n {
+                for dx in -n..=n {
+                    let p = Pose {
+                        x: origin.x + dx as f64 * 0.05,
+                        y: origin.y + dy as f64 * 0.05,
+                        theta: wrap(origin.theta + da as f64 * 0.05),
+                    };
+                    if allowed(p) {
+                        candidates.push(self.score(p, &sparse));
+                    }
+                }
+            }
+        }
+        candidates.sort_by(|a, b| b.likelihood.total_cmp(&a.likelihood));
+        let mut modes = Vec::new();
+        let mut explored: Vec<Pose> = Vec::new();
+        for candidate in candidates {
+            if explored.iter().any(|p| {
+                p.distance(candidate.pose) < 0.10
+                    && wrap(p.theta - candidate.pose.theta).abs() < 0.10
+            }) {
+                continue;
+            }
+            explored.push(candidate.pose);
+            let filtered: Vec<_> = points
+                .iter()
+                .copied()
+                .filter(|p| reflections.is_none_or(|r| !r.reflected(candidate.pose, *p)))
+                .collect();
+            if filtered.len() >= 100 && filtered.len() * 3 >= points.len() {
+                let fit = self.refine(candidate.pose, &filtered, false);
+                // Refinement may cross the search boundary: retain its bounded
+                // seed as a fallback, never discard a valid edge candidate.
+                let mut fit = if allowed(fit.pose) {
+                    fit
+                } else {
+                    self.score(candidate.pose, &filtered)
+                };
+                let visibility = evidence.evaluate(fit.pose, &filtered);
+                fit.likelihood -= 0.5 * visibility.contradiction;
+                if fit.agreement >= 0.65 && !visibility.tracking_lost {
+                    merge(&mut modes, fit);
+                }
+            }
+            if explored.len() >= 32 {
+                break;
+            }
+        }
+        consolidate(modes)
+    }
     #[cfg(test)]
     pub fn track(
         &self,
@@ -439,6 +517,39 @@ mod robustness_tests {
             unique(&modes).is_none(),
             "repeated geometry must not create a confident wrong room"
         );
+    }
+    #[test]
+    fn recovery_corrects_drift_that_tracking_penalty_cannot_resolve() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../mapping/fixtures/known-position-duplicate-seeds.json"
+        ))
+        .unwrap();
+        let grid: Grid = serde_json::from_value(v["grid"].clone()).unwrap();
+        let points: Vec<[f64; 2]> = serde_json::from_value(v["points"].clone()).unwrap();
+        let evidence = EvidenceMap::new(Reference {
+            map_id: evidence_id(),
+            revision: "recovery".into(),
+            grid: grid.clone(),
+        })
+        .unwrap();
+        let matcher = ScanMatcher::new(grid);
+        let expected = unique(&matcher.global(&points, &evidence)).unwrap();
+        let mut prior = expected;
+        prior.pose.x += 0.22;
+        prior.pose.theta += 0.22;
+        let old = matcher.track_window(&[prior], &points, &evidence, true);
+        let recovered = matcher.recover(prior.pose, 0.30, 0.30, &points, &evidence, None);
+        let best = unique(&recovered).expect("recover a distinct pose within motion bounds");
+        assert!(best.pose.distance(expected.pose) < 0.08, "{:?}", best);
+        assert!(wrap(best.pose.theta - expected.pose.theta).abs() < 0.05);
+        assert!(
+            old.first()
+                .is_none_or(|h| h.pose.distance(expected.pose) > 0.08
+                    || wrap(h.pose.theta - expected.pose.theta).abs() > 0.05),
+            "fixture must reproduce old under-correction"
+        );
+        assert!(recovered.iter().all(|h| h.pose.distance(prior.pose) <= 0.30
+            && wrap(h.pose.theta - prior.pose.theta).abs() <= 0.30));
     }
     #[test]
     fn known_pose_tracks_with_partial_occlusion_without_a_global_reset() {

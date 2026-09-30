@@ -67,6 +67,7 @@ pub struct Status {
     pub generation: u64,
     pub source_stamp: Option<f64>,
     pub hypotheses: Vec<Hypothesis>,
+    pub motion_prior: Option<Pose>,
 }
 struct Map {
     config: Config,
@@ -94,9 +95,16 @@ impl MotionPrior {
         self.travel += (left.abs() + right.abs()) / 2.;
         self.turn += ((right - left) / 0.243).abs();
     }
+    fn bounds(&self) -> (f64, f64) {
+        (
+            (0.30 + 0.15 * self.travel).min(0.75),
+            (0.30 + 0.10 * self.turn).min(0.70),
+        )
+    }
     fn accepts(&self, pose: Pose) -> bool {
-        self.pose.distance(pose) <= (0.30 + 0.15 * self.travel).min(0.75)
-            && wrap(self.pose.theta - pose.theta).abs() <= (0.30 + 0.10 * self.turn).min(0.70)
+        let (translation, rotation) = self.bounds();
+        self.pose.distance(pose) <= translation
+            && wrap(self.pose.theta - pose.theta).abs() <= rotation
     }
 }
 #[derive(Default)]
@@ -135,11 +143,51 @@ impl Consensus {
         }
     }
 }
+/// A rejected anchor can only be replaced by a strong global solution that
+/// follows measured motion across independent views, never repeated still scans.
+#[derive(Default)]
+struct RelocationEvidence {
+    candidate: Option<(Pose, Pose)>,
+    views: Vec<Pose>,
+    scans: usize,
+}
+impl RelocationEvidence {
+    fn observe(&mut self, modes: &[Hypothesis], odom: Pose) -> Option<Hypothesis> {
+        let Some(best) = modes.first().copied().filter(|h| {
+            h.agreement >= 0.92
+                && h.likelihood >= 0.85
+                && modes
+                    .get(1)
+                    .is_none_or(|n| h.likelihood - n.likelihood >= 0.12)
+        }) else {
+            *self = Self::default();
+            return None;
+        };
+        if self.candidate.is_none_or(|(pose, at)| {
+            let expected = advance(pose, at, odom);
+            expected.distance(best.pose) > 0.12
+                || wrap(expected.theta - best.pose.theta).abs() > 0.12
+        }) {
+            *self = Self::default();
+        }
+        self.candidate = Some((best.pose, odom));
+        self.scans += 1;
+        if self
+            .views
+            .iter()
+            .all(|p| p.distance(odom) >= 0.12 || wrap(p.theta - odom.theta).abs() >= 0.20)
+        {
+            self.views.push(odom);
+        }
+        (self.scans >= 6 && self.views.len() >= 3).then_some(best)
+    }
+}
 struct State {
     map: Option<Arc<Map>>,
     generation: u64,
     pose: Option<Pose>,
     consensus: Consensus,
+    relocation: RelocationEvidence,
     anchor: Option<MotionPrior>,
     score: f64,
     matched: Option<Instant>,
@@ -165,6 +213,7 @@ impl Default for State {
             generation: 0,
             pose: None,
             consensus: Consensus::default(),
+            relocation: RelocationEvidence::default(),
             anchor: None,
             score: 0.,
             matched: None,
@@ -202,6 +251,7 @@ fn invalidate(s: &mut State, message: &str) {
     s.modes.clear();
     s.anchor = None;
     s.consensus = Consensus::default();
+    s.relocation = RelocationEvidence::default();
     s.pose = None;
     s.matched = None;
     s.confirm = 0;
@@ -217,14 +267,33 @@ fn accept_match(
     modes: Vec<Hypothesis>,
 ) {
     if generation == s.generation {
-        s.modes = modes
+        let modes: Vec<_> = modes
             .into_iter()
             .map(|mut h| {
                 h.pose = advance(h.pose, at, s.odom);
                 h
             })
+            .collect();
+        let relocation = if s.confirm == 0
+            && s.anchor.is_some()
+            && modes
+                .first()
+                .is_some_and(|h| !s.anchor.unwrap().accepts(h.pose))
+        {
+            s.relocation.observe(&modes, s.odom)
+        } else {
+            None
+        };
+        s.modes = modes
+            .into_iter()
             .filter(|h| s.anchor.is_none_or(|anchor| anchor.accepts(h.pose)))
             .collect();
+        if let Some(best) = relocation {
+            s.anchor = None;
+            s.consensus = Consensus::default();
+            s.modes = vec![best];
+            s.relocation = RelocationEvidence::default();
+        }
         let selected = if s.anchor.is_some() && s.confirm >= CONFIRM_SCANS {
             s.consensus = Consensus::default();
             unique(&s.modes)
@@ -232,6 +301,7 @@ fn accept_match(
             s.consensus.observe(&s.modes)
         };
         if let Some(best) = selected {
+            s.relocation = RelocationEvidence::default();
             let updated = best.pose;
             s.confirm = if s.pose.is_some_and(|old| {
                 old.distance(updated) < 0.2 && wrap(old.theta - updated.theta).abs() < 0.2
@@ -433,6 +503,7 @@ impl LocalizationService {
             generation: s.generation,
             source_stamp: s.previous.map(|(_, stamp)| stamp),
             hypotheses: s.modes.clone(),
+            motion_prior: s.anchor.map(|a| a.pose),
         }
     }
     async fn tick(&self) {
@@ -553,16 +624,42 @@ impl LocalizationService {
         if priors.is_empty() && s.last_search.elapsed() < Duration::from_secs(1) {
             return;
         }
-        let global = priors.is_empty()
-            || (seed.is_none() && s.last_global.elapsed() > Duration::from_secs(5));
-        if global {
+        let recovery = s
+            .anchor
+            .filter(|_| seed.is_none())
+            .map(|anchor| (advance(anchor.pose, s.odom, at), anchor.bounds()));
+        let check_global = recovery.is_some() && s.last_global.elapsed() > Duration::from_secs(2);
+        let global = recovery.is_none()
+            && (priors.is_empty()
+                || (seed.is_none() && s.last_global.elapsed() > Duration::from_secs(5)));
+        if global || check_global {
             s.last_global = Instant::now();
         }
         s.last_search = Instant::now();
         let recovery_window = seed.is_none() && s.anchor.is_some();
         let reflections = self.reflectance.load(&map.config.map_id).await.ok();
         s.search = Some(tokio::task::spawn_blocking(move || {
-            let mut modes = if global {
+            let mut modes = if let Some((origin, (translation, rotation))) = recovery {
+                let nearby = map.matcher.recover(
+                    origin,
+                    translation,
+                    rotation,
+                    &points,
+                    &map.evidence,
+                    reflections.as_deref(),
+                );
+                if check_global && unique(&nearby).is_none() {
+                    let mut all = nearby;
+                    all.extend(map.matcher.global_with_reflections(
+                        &points,
+                        &map.evidence,
+                        reflections.as_deref(),
+                    ));
+                    consolidate(all)
+                } else {
+                    nearby
+                }
+            } else if global {
                 map.matcher
                     .global_with_reflections(&points, &map.evidence, reflections.as_deref())
             } else {
@@ -637,7 +734,7 @@ fn interpolate(h: &VecDeque<(f64, Pose)>, stamp: f64) -> Option<Pose> {
     }
     None
 }
-fn scan_points(scan: &LidarScan) -> Vec<[f64; 2]> {
+pub(crate) fn scan_points(scan: &LidarScan) -> Vec<[f64; 2]> {
     let mut bins = [f64::INFINITY; 720];
     for p in &scan.points {
         let x = p.x as f64 / 1000.;
@@ -936,5 +1033,83 @@ mod recorded_consensus_test {
             }
         }
         assert!(accepted > 5, "recorded persistent winner should resolve");
+    }
+}
+
+#[cfg(test)]
+mod relocation_tests {
+    use super::*;
+    fn modes(odom: Pose) -> Vec<Hypothesis> {
+        vec![
+            Hypothesis {
+                pose: advance(
+                    Pose {
+                        x: 4.,
+                        y: 2.,
+                        theta: 0.,
+                    },
+                    Pose::default(),
+                    odom,
+                ),
+                likelihood: 0.96,
+                agreement: 0.99,
+            },
+            Hypothesis {
+                pose: Pose {
+                    x: 9.,
+                    y: 9.,
+                    theta: 0.,
+                },
+                likelihood: 0.70,
+                agreement: 0.8,
+            },
+        ]
+    }
+    #[test]
+    fn strong_stationary_alias_never_replaces_motion_anchor() {
+        let mut r = RelocationEvidence::default();
+        for _ in 0..100 {
+            assert!(
+                r.observe(&modes(Pose::default()), Pose::default())
+                    .is_none()
+            );
+        }
+    }
+    #[test]
+    fn strong_relocation_requires_three_motion_consistent_views() {
+        let mut r = RelocationEvidence::default();
+        let mut result = None;
+        for angle in [0., 0., 0.25, 0.25, 0.5, 0.5] {
+            let odom = Pose {
+                x: 0.,
+                y: 0.,
+                theta: angle,
+            };
+            result = r.observe(&modes(odom), odom);
+        }
+        assert!(result.is_some());
+        let odom = Pose {
+            x: 0.,
+            y: 0.,
+            theta: 0.8,
+        };
+        assert!(
+            r.observe(&modes(Pose::default()), odom).is_none(),
+            "inconsistent relative motion restarts confirmation"
+        );
+    }
+    #[test]
+    fn ambiguous_views_cannot_reset_anchor() {
+        let mut r = RelocationEvidence::default();
+        for angle in [0., 0.25, 0.5, 0.75, 1., 1.25, 1.5] {
+            let odom = Pose {
+                x: 0.,
+                y: 0.,
+                theta: angle,
+            };
+            let mut m = modes(odom);
+            m[1].likelihood = 0.90;
+            assert!(r.observe(&m, odom).is_none());
+        }
     }
 }

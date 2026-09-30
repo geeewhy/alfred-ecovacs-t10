@@ -17,6 +17,49 @@ use std::sync::Arc;
 async fn main() -> std::io::Result<()> {
     // Offline replay mode never constructs ROS publishers or a motor service.
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--localization-replay") {
+        if !(4..=5).contains(&args.len()) {
+            return Err(std::io::Error::other(
+                "usage: --localization-replay MAP_CONFIG CAPTURE [PRIOR_JSON]",
+            ));
+        }
+        let config: components::localization::Config =
+            serde_json::from_slice(&std::fs::read(&args[2])?)?;
+        let captured: serde_json::Value = serde_json::from_slice(&std::fs::read(&args[3])?)?;
+        let scan = components::lidar::LidarScan {
+            points: captured["lidar"]["result"]["points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| components::lidar::LidarPoint {
+                    x: p["x"].as_f64().unwrap() as f32,
+                    y: p["y"].as_f64().unwrap() as f32,
+                    power: p["power"].as_f64().unwrap() as f32,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let points = components::localization::scan_points(&scan);
+        let evidence =
+            components::map_evidence::EvidenceMap::new(components::map_evidence::Reference {
+                map_id: config.map_id,
+                revision: config.revision,
+                grid: config.grid.clone(),
+            })
+            .map_err(std::io::Error::other)?;
+        let matcher = components::scan_matcher::ScanMatcher::new(config.grid);
+        let modes = if let Some(raw) = args.get(4) {
+            let prior: components::return_geometry::Pose = serde_json::from_str(raw)?;
+            matcher.recover(prior, 0.75, 0.70, &points, &evidence, None)
+        } else {
+            matcher.global_with_reflections(&points, &evidence, None)
+        };
+        println!(
+            "{}",
+            serde_json::json!({"modes":modes,"points":points.len()})
+        );
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("--navigation-replay") {
         if args.len() != 4 {
             return Err(std::io::Error::other(
