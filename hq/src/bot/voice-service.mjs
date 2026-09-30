@@ -18,6 +18,12 @@ export class VoiceService {
       if (this.child) this.child.stdin.end();
       this.state = { status: 'off', message: 'Robot microphone off' }; return;
     }
+    if (this.state.status === 'error' && !this.child && !this.starting) {
+      this.retryAt ||= Date.now() + 15000;
+      if (Date.now() < this.retryAt) return;
+      this.retryAt = null;
+      this.state = { status: 'off', message: 'Reconnecting robot microphone' };
+    }
     if (!this.child && !this.starting && this.state.status !== 'error') {
       this.starting = true;
       try {
