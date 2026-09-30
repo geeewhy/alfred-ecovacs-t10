@@ -224,7 +224,7 @@ async function startAgentSettings() {
     const [modelsResponse, stateResponse] = await Promise.all([chatFetch("/api/bots/alfred/chat/models"), chatFetch("/api/bots/alfred/chat/settings")]);
     const models = await modelsResponse.json(), state = await stateResponse.json();
     if (!modelsResponse.ok || !stateResponse.ok) throw new Error(models.error || state.error);
-    catalog = models.result; agent.replaceChildren(...Object.keys(catalog).map(id => new Option(id === "codex" ? "Codex" : "Claude", id)));
+    catalog = models.result; agent.replaceChildren(...Object.keys(catalog).map(id => new Option(({codex:"Codex",claude:"Claude",antigravity:"Antigravity"}[id] || id), id)));
     agent.value = state.result.agent; fillModels(state.result.model);
     agent.disabled = false; model.disabled = false; button.disabled = false; status.textContent = "";
   } catch (error) { status.textContent = error.message; }

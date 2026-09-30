@@ -29,7 +29,7 @@ Only after explicit movement intent, resolve the name again and use the existing
 
 ## Command receipt and compact responses
 
-HQ immediately displays “Received.” for an accepted request and speaks it when speaker output is enabled. This acknowledges receipt, not execution or success. The agent supplies the verified result separately. Receipt and result playback are serialized. Historical acknowledgments are never replayed.
+The LLM acknowledges action commands naturally in commentary before invoking tools. HQ displays and speaks correlated progress, followed by the verified result. Conversation receives a direct answer, with no automatic receipt phrase. Playback is serialized.
 
 For return to station use POST `/api/maps/{mapId}/return-onboard`, then GET `/api/maps/engine-return`. The `/return` route is the HQ-guided backup. Report an active operation as “Returning.”; only report docking after fresh charging verification. Do not interpret an active return as failure just because charging has not started yet.
 

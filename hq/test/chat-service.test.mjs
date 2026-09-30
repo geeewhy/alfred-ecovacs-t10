@@ -14,10 +14,10 @@ test('closed session recovers once, retains history and model, and waits for lau
     const calls = []; let listed = false;
     const service = new ChatService({}, { file, poll: false, command: async args => {
       calls.push(args);
-      if (args[0] === 'list') return { sessions: listed ? [{ id: 'live', label: service.state.sessionLabel, thread: 'one-offs/diy-ecovacs-t10-salvage', agent: 'codex' }] : [] };
+      if (args[0] === 'list') return { sessions: listed ? [{ id: 'live', label: service.state.sessionLabel, thread: 'one-offs/diy-ecovacs-t10-salvage/botchat', agent: 'codex' }] : [] };
       if (args[1] === 'open') return {};
       if (args[2] === 'closed') return { closed: true };
-      return { id: 'live', agent: 'codex', thread: 'one-offs/diy-ecovacs-t10-salvage', pane_live: true, transcript_path: '/tmp/transcript' };
+      return { id: 'live', agent: 'codex', thread: 'one-offs/diy-ecovacs-t10-salvage/botchat', pane_live: true, transcript_path: '/tmp/transcript' };
     }});
     await service.ready;
     await service.exclusive(() => service.ensureSession());
@@ -78,27 +78,28 @@ test('partial transcript records are retried intact, including Unicode', async (
   } finally { await rm(dir,{recursive:true,force:true}); }
 });
 
-test('acceptance acknowledges before delivery and serializes receipt/result playback', async () => {
+test('LLM progress precedes result playback without automatic receipt', async () => {
   const dir=await mkdtemp(path.join(tmpdir(),'alfred-chat-'));
   try {
     const file=path.join(dir,'chat.json'), transcript=path.join(dir,'transcript.jsonl');
     await writeFile(transcript,'');
     const spoken=[];
     let release;
-    const speech={say:async text=>{spoken.push(text);if(text==='Received.')await new Promise(resolve=>{release=resolve;});}};
+    const speech={say:async text=>{spoken.push(text);if(text==='Returning.')await new Promise(resolve=>{release=resolve;});}};
     const service=new ChatService(speech,{file,poll:false,command:async args=>{
-      if(args[1]==='send'){assert.equal(service.state.messages.at(-1).text,'Received.');assert.ok(args[3].length<500);assert.match(args[3],/^\[HQ_ALFRED_REQUEST:/);assert.match(args[3],/chat-requests/);}
+      if(args[1]==='send'){assert.equal(service.state.messages.at(-1).role,'you');assert.ok(args[3].length<500);assert.match(args[3],/^\[HQ_ALFRED_REQUEST:/);assert.match(args[3],/chat-requests/);}
       return {};
     }});
     await service.ready;
     service.state.enabled=true;service.state.speaker=true;
     service.session=async()=>({id:'session',transcript_path:transcript});
     await service.send('Hello');
-    assert.equal(service.state.messages[1].kind,'acknowledgment');
+    assert.equal(service.state.messages.length,1);
+    await service.exclusive(()=>service.progressReply(service.state.pending,'Returning.'));
     await service.exclusive(()=>service.finishReply(service.state.pending,'Ready.'));
-    assert.deepEqual(spoken,['Received.']);
+    assert.deepEqual(spoken,['Returning.']);
     release();await service.playback;
-    assert.deepEqual(spoken,['Received.','Ready.']);
+    assert.deepEqual(spoken,['Returning.','Ready.']);
     assert.equal(service.state.messages[1].audio,'sent');
     assert.equal(service.state.messages[2].audio,'sent');
   } finally {await rm(dir,{recursive:true,force:true});}
@@ -118,5 +119,47 @@ test('Claude truncated legacy request recovers its existing final without resend
     await service.exclusive(()=>service.poll());
     assert.equal(service.state.pending,null);
     assert.equal(service.state.messages.at(-1).text,'Haiku.');
+  } finally {await rm(dir,{recursive:true,force:true});}
+});
+
+test('Antigravity recovers wrapped request and final, ignoring tools and unrelated replies', async () => {
+  const dir=await mkdtemp(path.join(tmpdir(),'alfred-chat-'));
+  try {
+    const file=path.join(dir,'chat.json'), transcript=path.join(dir,'transcript.jsonl');
+    const records=[
+      {step_index:0,source:'MODEL',type:'PLANNER_RESPONSE',status:'DONE',content:'Unrelated'},
+      {step_index:1,source:'USER_EXPLICIT',type:'USER_INPUT',status:'DONE',content:'<USER_REQUEST>\n[HQ_ALFRED_REQUEST:r] Read request file\n</USER_REQUEST>'},
+      {step_index:2,source:'MODEL',type:'PLANNER_RESPONSE',status:'DONE',content:'Checking',tool_calls:[{name:'view_file'}]},
+      {step_index:3,source:'MODEL',type:'GENERIC',status:'DONE',content:'tool output'},
+      {step_index:4,source:'MODEL',type:'PLANNER_RESPONSE',status:'DONE',content:'Hello.'}
+    ];
+    const data=records.map(JSON.stringify).join('\n')+'\n';
+    await writeFile(transcript,data);
+    await writeFile(file,JSON.stringify({messages:[],pending:{id:'r',agent:'antigravity',path:transcript,offset:Buffer.byteLength(data),started:Date.now(),turnId:null}}));
+    const service=new ChatService({}, {file,poll:false});
+    await service.exclusive(()=>service.poll());
+    assert.equal(service.state.pending,null);
+    assert.equal(service.state.messages.at(-1).text,'Hello.');
+  } finally {await rm(dir,{recursive:true,force:true});}
+});
+
+test('idle development session migrates to botchat without changing model or history', async () => {
+  const dir=await mkdtemp(path.join(tmpdir(),'alfred-chat-'));
+  try {
+    const file=path.join(dir,'chat.json');
+    await writeFile(file,JSON.stringify({enabled:true,sessionId:'old',agent:'antigravity',model:'gemini-3.6-flash-low',messages:[{role:'you',text:'hello'}]}));
+    const calls=[];
+    const service=new ChatService({}, {file,poll:false,command:async args=>{
+      calls.push(args);
+      if(args[1]==='inspect')return {id:'old',thread:'one-offs/diy-ecovacs-t10-salvage',agent:'antigravity',pane_live:true};
+      if(args[0]==='list')return {sessions:[]};
+      return {};
+    }});
+    await service.exclusive(()=>service.ensureSession());
+    const launch=calls.find(args=>args[1]==='open');
+    assert.equal(launch[2],'one-offs/diy-ecovacs-t10-salvage/botchat');
+    assert.ok(launch.includes('gemini-3.6-flash-low'));
+    assert.equal(service.state.messages.length,1);
+    assert.equal(calls.filter(args=>args[1]==='send').length,0);
   } finally {await rm(dir,{recursive:true,force:true});}
 });

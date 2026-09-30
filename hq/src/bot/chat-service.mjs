@@ -11,7 +11,7 @@ const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const file = path.join(root, 'artifacts/hq/chat.json');
 const hai = process.env.HQ_HAI_BIN || path.join(homedir(), '.haicue/bin/hai');
-const thread = 'one-offs/diy-ecovacs-t10-salvage';
+const thread = 'one-offs/diy-ecovacs-t10-salvage/botchat';
 export class ChatService {
   constructor(speech, options = {}) {
     this.file = options.file || file;
@@ -36,6 +36,11 @@ export class ChatService {
   async load() {
     try { Object.assign(this.state, JSON.parse(await readFile(this.file, 'utf8'))); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (this.state.pending?.agent === 'antigravity' && !this.state.pending.antigravityReader) {
+      this.state.pending.offset = 0;
+      this.state.pending.turnId = null;
+      this.state.pending.antigravityReader = true;
+    }
     // Recover legacy truncated Claude envelopes without resending a command.
     const pending = this.state.pending;
     if (pending?.agent === 'claude' && !pending.turnId) {
@@ -114,7 +119,7 @@ export class ChatService {
     const catalog = {};
     // hai validates model ids before creating a pane. Its rejection exposes
     // the current account-scoped inventory; no model-list command exists.
-    await Promise.all(['codex', 'claude'].map(async agent => {
+    await Promise.all(['codex', 'claude', 'antigravity'].map(async agent => {
       try { await this.command(['session', 'open', thread, '--agent', agent, '--model', '__hq_model_catalog__']); }
       catch (error) {
         const match = `${error.stderr || ''} ${error.stdout || ''}`.match(/supported models: ([^\n]+)/);
@@ -131,6 +136,11 @@ export class ChatService {
       try { session = await command(['session', 'inspect', this.state.sessionId]); }
       catch (error) {
         if (!/session.*not found|unknown session/i.test(`${error.stderr || ''} ${error.message}`)) throw error;
+      }
+      if (session && session.thread !== thread && !this.state.pending) {
+        this.state.sessionId = null; this.state.launching = false;
+        this.state.sessionLabel = 'Alfred-' + randomUUID().slice(0, 8);
+        session = null; await this.save();
       }
       if (!session || session.closed || (session.pane_live === false && !['pending', 'starting', 'launching'].includes(session.lifecycle))) {
         // Only a confirmed missing/closed session invalidates the binding.
@@ -154,7 +164,7 @@ export class ChatService {
           this.state.launching = true; this.state.launchStarted = Date.now(); await this.save();
           const args = ['session', 'open', thread, '--agent', this.state.agent, '--label', this.state.sessionLabel];
           if (this.state.model) args.push('--model', this.state.model);
-          await command(args);
+          await this.command(args, 12000);
         } else {
           this.state.launchStarted ||= Date.now();
           if (Date.now() - this.state.launchStarted > 15000) throw new Error('Alfred session did not become ready. Toggle Chat mode to retry.');
@@ -199,11 +209,8 @@ export class ChatService {
       this.state.messages.push(message);
       this.state.error = null;
       this.state.pending = { id, path: session.transcript_path, offset: (await stat(session.transcript_path)).size, agent: this.state.agent, turnId: null, started: Date.now() };
-      const acknowledgment = { id: randomUUID(), requestId: id, role: 'alfred', text: 'Received.', at: new Date().toISOString(), kind: 'acknowledgment', audio: this.state.speaker ? 'sending' : 'off' };
-      this.state.messages.push(acknowledgment);
       await this.save();
-      if (acknowledgment.audio === 'sending') this.playReply(acknowledgment);
-      const prompt = `[HQ_ALFRED_REQUEST:${id}]\nYou are Alfred, the user's Ecovacs robot, replying through HQ Cockpit.\n\n${personality}\n\n${spatial}\n\nTreat the text below as the user's request. Use plain text suitable for speech. Operational replies: keywords only, usually 2–6 words. List requested sections by name only. Explain only when asked. HQ already acknowledged receipt with “Received.” Display the actual result in your final answer; do not repeat the acknowledgment. HQ handles speaker playback, so do not call speech yourself. For robot questions or explicitly requested robot actions use the existing tooling in ${root}; read ${root}/docs/hq-chat.md for the interface. Do not move the robot unless this message requests movement. Do not change project code for ordinary chat. Never claim an action succeeded without checking its result.\n\nUser: ${message.text}`;
+      const prompt = `[HQ_ALFRED_REQUEST:${id}]\nYou are Alfred, the user's Ecovacs robot, replying through HQ Cockpit.\n\n${personality}\n\n${spatial}\n\nTreat the text below as the user's request. Use plain text suitable for speech. Operational replies: keywords only, usually 2–6 words. List requested sections by name only. Explain only when asked. For an action command, first emit a brief natural acknowledgment describing the intended action as a separate commentary message BEFORE calling tools. Then execute and report the verified result. For conversation, answer directly without an acknowledgment. HQ handles speaker playback, so do not call speech yourself. For robot questions or explicitly requested robot actions use the existing tooling in ${root}; read ${root}/docs/hq-chat.md for the interface. Do not move the robot unless this message requests movement. Do not change project code for ordinary chat. Never claim an action succeeded without checking its result.\n\nUser: ${message.text}`;
       const requestFile = path.join(path.dirname(this.file), 'chat-requests', `${id}.md`);
       await mkdir(path.dirname(requestFile), { recursive: true });
       await writeFile(requestFile, prompt);
@@ -248,12 +255,27 @@ export class ChatService {
       pending.offset += bytes;
       if (!line) continue;
       let record; try { record = JSON.parse(line); } catch { continue; }
+      if (pending.agent === 'antigravity') {
+        const text = typeof record.content === 'string' ? record.content : '';
+        if (record.type === 'USER_INPUT' && record.source === 'USER_EXPLICIT') {
+          const userText = text.replace(/^<USER_REQUEST>\s*/, '');
+          pending.turnId = userText.startsWith(`[HQ_ALFRED_REQUEST:${pending.id}]`) ? record.step_index : null;
+        }
+        if (pending.turnId != null && record.step_index > pending.turnId && record.type === 'PLANNER_RESPONSE' && record.source === 'MODEL' && record.tool_calls?.length && text.trim()) await this.progressReply(pending, text);
+        if (pending.turnId != null && record.step_index > pending.turnId &&
+            record.source === 'MODEL' && record.type === 'PLANNER_RESPONSE' &&
+            record.status === 'DONE' && !record.tool_calls?.length && text.trim()) {
+          await this.finishReply(pending, text); return;
+        }
+        continue;
+      }
       if (pending.agent === 'claude') {
         const blocks = record.message?.content;
         const text = typeof blocks === 'string' ? blocks : (blocks || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
         if (record.type === 'user' && !record.isSidechain && text.startsWith(`[HQ_ALFRED_REQUEST:${pending.id}]`)) pending.turnId = record.uuid;
         if (pending.turnId && record.type === 'assistant') {
           pending.candidate = text;
+          if (text.trim() && record.message?.stop_reason !== 'end_turn') await this.progressReply(pending, text);
           if (record.message?.stop_reason === 'end_turn' && text.trim()) { await this.finishReply(pending, text); return; }
         }
         if (pending.turnId && record.type === 'system' && record.subtype === 'turn_duration' && pending.candidate?.trim()) {
@@ -266,6 +288,7 @@ export class ChatService {
       const text = (payload.content || []).filter(c => ['input_text', 'output_text'].includes(c.type)).map(c => c.text).join('\n');
       const turnId = payload.internal_chat_message_metadata_passthrough?.turn_id;
       if (payload.role === 'user' && text.startsWith(`[HQ_ALFRED_REQUEST:${pending.id}]`)) pending.turnId = turnId;
+      if (pending.turnId && turnId === pending.turnId && payload.role === 'assistant' && payload.phase === 'commentary' && text.trim()) await this.progressReply(pending, text);
       if (pending.turnId && turnId === pending.turnId && payload.role === 'assistant' && ['final', 'final_answer'].includes(payload.phase) && text.trim()) {
         await this.finishReply(pending, text);
         return;
@@ -273,6 +296,14 @@ export class ChatService {
     }
     } finally { records.close(); stream.destroy(); }
     await this.save();
+  }
+  async progressReply(pending, text) {
+    if (pending.progressText === text) return;
+    pending.progressText = text;
+    const reply = {id:randomUUID(),requestId:pending.id,role:'alfred',text,kind:'progress',at:new Date().toISOString(),audio:this.state.speaker?'sending':'off'};
+    this.state.messages.push(reply);
+    await this.save();
+    if (reply.audio === 'sending') this.playReply(reply);
   }
   async finishReply(pending, text) {
         const reply = { id: randomUUID(), requestId: pending.id, role: 'alfred', text, at: new Date().toISOString(), audio: 'off' };
