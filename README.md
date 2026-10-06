@@ -1,6 +1,8 @@
 # Alfred
 
-A second job for my Ecovacs T10 Omni: a house robot with a live camera, LiDAR maps, voice commands and custom navigation. A Rust engine runs onboard; a local browser cockpit handles driving, named map sections and return-to-dock commands. There's also experimental cat-follow using dark-object motion tracking.
+This started with an Ecovacs T10 Omni that didn't vacuum right. We had no idea what was running inside. Could've been potatoes.
+
+Now it chases the cat around the house, builds maps with LiDAR, and takes voice commands. A browser cockpit gives us a live camera feed, remote driving, named map sections and return-to-dock controls. A custom Rust engine runs onboard.
 
 Built for the DBX53 on firmware 1.11.0.
 
