@@ -1,4 +1,5 @@
-//! Engine-owned return operation. No HTTP client, HQ heartbeat or companion dependency.
+use super::{camera::CameraTelemetry, cat_follow};
+// Engine-owned return operation. No HTTP client, HQ heartbeat or companion dependency.
 use super::navigation::{Command, Navigator};
 use super::return_geometry::{DockController, Geometry, Pose, ReturnMap, wrap};
 use super::{
@@ -33,6 +34,7 @@ pub struct ReturnStatus {
     pub replans: u32,
     pub elapsed_ms: u64,
     pub navigation: serde_json::Value,
+    pub cat: Option<cat_follow::Status>,
 }
 impl Default for ReturnStatus {
     fn default() -> Self {
@@ -48,6 +50,7 @@ impl Default for ReturnStatus {
             replans: 0,
             elapsed_ms: 0,
             navigation: serde_json::Value::Null,
+            cat: None,
         }
     }
 }
@@ -138,7 +141,57 @@ fn at_contacts(station: Pose, pose: Pose) -> bool {
     let p = station.relative(pose);
     (-0.10..=0.04).contains(&p.x) && p.y.abs() <= 0.05 && p.theta.abs() <= 0.30
 }
+struct ContactRecovery {
+    started: Instant,
+    wheels: [f32; 2],
+    turn: f64,
+}
+impl ContactRecovery {
+    fn command(&self, wheels: [f32; 2], elapsed: f64, pressed: bool) -> Option<(f64, f64)> {
+        let left = (wheels[0] - self.wheels[0]) as f64 / 1000.;
+        let right = (wheels[1] - self.wheels[1]) as f64 / 1000.;
+        let distance = ((left + right) / 2.).abs();
+        if elapsed >= 2.
+            || distance >= 0.12
+            || (right - left).abs() / 0.243 >= 0.35
+            || (!pressed && distance >= 0.06)
+        {
+            return None;
+        }
+        // First unload the bumper straight; then open an angled escape.
+        Some((
+            -0.10,
+            if distance < 0.04 {
+                0.
+            } else {
+                self.turn * 0.25
+            },
+        ))
+    }
+}
+fn contact_recovery_clear(scan: &LidarScan) -> bool {
+    let mut rear = 0;
+    for p in &scan.points {
+        if p.power <= 0. {
+            continue;
+        }
+        let x = p.x as f64 / 1000.;
+        let y = p.y as f64 / 1000.;
+        if x.hypot(y) < 0.06 {
+            continue;
+        }
+        if x < 0. {
+            rear += 1;
+        }
+        // Include the swept rear corners during the shallow reverse arc.
+        if x < -0.06 && x > -0.30 && y.abs() < 0.23 {
+            return false;
+        }
+    }
+    rear >= 20
+}
 struct Operation {
+    cat: Option<cat_follow::Search>,
     status: ReturnStatus,
     started: Instant,
     lost: Option<Instant>,
@@ -148,6 +201,10 @@ struct Operation {
     reseat: bool,
     seating: Option<ContactSeating>,
     docking: DockController,
+    contact_recovery: Option<ContactRecovery>,
+    contact_attempts: u8,
+    departure_anchored: bool,
+    departing: bool,
     contact: Option<Instant>,
     progress: Option<(Instant, Pose)>,
     localization_sweep: Option<LocalizationSweep>,
@@ -163,6 +220,7 @@ impl Operation {
 impl Default for Operation {
     fn default() -> Self {
         Self {
+            cat: None,
             status: ReturnStatus::default(),
             started: Instant::now(),
             lost: None,
@@ -172,6 +230,10 @@ impl Default for Operation {
             reseat: false,
             seating: None,
             docking: DockController::default(),
+            contact_recovery: None,
+            contact_attempts: 0,
+            departure_anchored: false,
+            departing: false,
             contact: None,
             progress: None,
             localization_sweep: None,
@@ -180,6 +242,8 @@ impl Default for Operation {
     }
 }
 pub struct ReturnService {
+    camera: Arc<CameraTelemetry>,
+    last_cat: RwLock<Option<cat_follow::Sighting>>,
     pub gate: Mutex<()>,
     localization: Arc<super::localization::LocalizationService>,
     operation: Mutex<Operation>,
@@ -193,6 +257,7 @@ pub struct ReturnService {
 }
 impl ReturnService {
     pub async fn new(
+        camera: Arc<CameraTelemetry>,
         drive: Arc<DriveService>,
         lidar: Arc<LidarTelemetry>,
         mapping: Arc<NativeMapping>,
@@ -207,6 +272,13 @@ impl ReturnService {
             .and_then(|m| Geometry::new(m).ok())
             .map(Arc::new);
         let service = Arc::new(Self {
+            camera,
+            last_cat: RwLock::new(
+                tokio::fs::read("/data/alfred/state/last-cat.json")
+                    .await
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok()),
+            ),
             localization,
             reflectance,
             gate: Mutex::new(()),
@@ -252,7 +324,18 @@ impl ReturnService {
         let op = self.operation.lock().await;
         let mut s = op.status.clone();
         s.navigation = op.navigator.summary();
+        s.cat = op.cat.as_ref().map(|c| {
+            let mut status = c.status.clone();
+            status.active = s.active;
+            status
+        });
         drop(op);
+        if s.cat.is_none() {
+            s.cat = Some(cat_follow::Status {
+                last_seen: self.last_cat.read().await.clone(),
+                ..Default::default()
+            });
+        }
         s.map_id = self
             .geometry
             .read()
@@ -286,6 +369,30 @@ impl ReturnService {
     }
     pub async fn start(&self) -> Result<(), String> {
         self.start_operation(None).await
+    }
+    pub async fn follow_cat(&self, map_id: String) -> Result<(), String> {
+        let map = self
+            .localization
+            .navigation_map()
+            .await
+            .ok_or("Install a saved map first")?;
+        if map.map_id != map_id {
+            return Err("Cat search belongs to a different map".into());
+        }
+        let geometry = Geometry::with_navigation_reflections(
+            map.clone(),
+            (*self.reflectance.load(&map_id).await?).clone(),
+        )?;
+        let mut search = cat_follow::Search::new(&geometry);
+        search.status.last_seen = self.last_cat.read().await.clone();
+        let goal = *search
+            .pending
+            .first()
+            .ok_or("No traversable search cells in this map")?;
+        self.start_operation(Some((map, goal))).await?;
+        self.operation.lock().await.cat = Some(search);
+        self.camera.track(true);
+        Ok(())
     }
     pub async fn navigate(&self, goal: NavigationGoal) -> Result<(), String> {
         if [goal.pose.x, goal.pose.y, goal.pose.theta]
@@ -457,14 +564,168 @@ impl ReturnService {
             Err(e) => self.hold(op, &e).await,
         }
     }
+    async fn cat_tick(
+        &self,
+        op: &mut Operation,
+        geometry: &Geometry,
+        scan: &LidarScan,
+        pose: Pose,
+        wheels: [f32; 2],
+    ) {
+        let now = op.started.elapsed().as_secs_f64();
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let cat = op.cat.as_mut().unwrap();
+        let frame = self.camera.vision().await;
+        cat.status.camera_age_ms = frame.as_ref().map(|f| wall.saturating_sub(f.stamp));
+        if !cat.status.camera_age_ms.is_some_and(|age| age < 700) {
+            cat.tracker.reset();
+            cat.status.target = None;
+            self.hold(op, "Waiting for fresh cat camera frames").await;
+            return;
+        }
+        let frame = frame.unwrap();
+        if cat.last_wheels.is_none_or(|previous| (previous[0]-wheels[0]).abs()>1. || (previous[1]-wheels[1]).abs()>1.) {cat.last_motion=now;}
+        cat.last_wheels=Some(wheels);
+        let target = cat.tracker.update(frame, now - cat.last_motion > 0.45);
+        let (phase, v, w) = if let Some(b) = target {
+            cat.sighting(&geometry.map.map_id, pose, b, cat.tracker.stamp);
+            let seen = cat.status.last_seen.clone().unwrap();
+            let save = self.last_cat.read().await.as_ref().is_none_or(|old| {
+                seen.observed_at_unix_ms
+                    .saturating_sub(old.observed_at_unix_ms)
+                    >= 1000
+            });
+            if save {
+                *self.last_cat.write().await = Some(seen.clone());
+                tokio::spawn(async move {
+                    if let Ok(data) = serde_json::to_vec(&seen) {
+                        let path = "/data/alfred/state/last-cat.json";
+                        if tokio::fs::write(format!("{path}.new"), data).await.is_ok() {
+                            let _ = tokio::fs::rename(format!("{path}.new"), path).await;
+                        }
+                    }
+                });
+            }
+            cat.last_follow = now;
+            cat.settled = None;
+            let (v, w) = cat_follow::follow(b);
+            ("following-cat", v, w)
+        } else {
+            cat.status.target = None;
+            if now - cat.last_follow < 2. && cat.last_follow > 0. {
+                ("reacquiring-cat", 0., 0.)
+            } else {
+                if cat.goal.is_none() && !cat.next(pose, now) {
+                    op.status.active = false;
+                    op.status.state = "search-complete".into();
+                    op.status.message = format!(
+                        "Cat search complete: {} cells checked, {} skipped",
+                        cat.status.cells_checked, cat.status.cells_skipped
+                    );
+                    cat.status.phase = "complete".into();
+                    let _ = self.drive.stop().await;
+                    return;
+                }
+                let goal = cat.goal.unwrap();
+                op.status.goal = Some(goal);
+                if now - cat.cell_started > 90. {
+                    cat.status.cells_skipped += 1;
+                    cat.goal = None;
+                    op.navigator.invalidate();
+                    ("searching-cat", 0., 0.)
+                } else if pose.distance(goal) < 0.16 {
+                    let error = wrap(cat_follow::view_heading(cat.view) - pose.theta);
+                    if error.abs() > 0.12 {
+                        cat.settled = None;
+                        if can_observe_by_turning(scan) {
+                            ("looking-for-cat", 0., (error * 1.5).clamp(-0.35, 0.35))
+                        } else {
+                            cat.status.cells_skipped += 1;
+                            cat.goal = None;
+                            ("searching-cat", 0., 0.)
+                        }
+                    } else {
+                        let since = *cat.settled.get_or_insert(now);
+                        if now - since > 2.5 {
+                            cat.view += 1;
+                            cat.settled = None;
+                            cat.tracker.reset();
+                            if cat.view >= 4 {
+                                cat.status.cells_checked += 1;
+                                cat.goal = None;
+                                op.navigator.invalidate();
+                            }
+                        }
+                        ("looking-for-cat", 0., 0.)
+                    }
+                } else if op.departing {
+                    ("searching-cat", 0.05, 0.)
+                } else {
+                    match op.navigator.command(geometry, pose, goal, now) {
+                        Command::Moving(v, w) => ("searching-cat", v, w),
+                        _ => ("searching-cat", 0., 0.),
+                    }
+                }
+            }
+        };
+        let cap = if phase == "following-cat" { 0.20 } else { 0.05 };
+        let (v, w) = cat_follow::limit(v, w, cap);
+        cat.status.phase = phase.into();
+        op.status.state = phase.into();
+        op.status.message = match phase {
+            "following-cat" => "Following dark moving target",
+            "reacquiring-cat" => "Target lost; looking again",
+            "looking-for-cat" => "Looking for dark movement",
+            _ => "Searching map cells at 50 mm/s",
+        }
+        .into();
+        // A clear mapped footprint and raw scan are required even for visual pursuit.
+        let mut projected = pose;
+        let mut blocked = false;
+        if v != 0. || w != 0. {
+            for _ in 0..10 {
+                projected.advance((v - w * 0.243 / 2.) * 0.08, (v + w * 0.243 / 2.) * 0.08);
+                if !op.departing && !geometry.traversable(projected) {
+                    blocked = true;
+                    break;
+                }
+            }
+        }
+        if phase == "following-cat" && v > 0. && scan.points.iter().filter(|p| p.power > 0. && p.x > 60. && p.x < 550. && p.y.abs() < 220.).count() >= 3 { blocked = true; }
+        if blocked || ((v != 0. || w != 0.) && obstruction(scan, geometry, pose, v, w, false)) {
+            op.navigator.invalidate();
+            op.status.message = "Cat mode waiting for a clear trajectory".into();
+            let _ = self.drive.stop().await;
+            return;
+        }
+        if v != 0. || w != 0. {
+            cat.last_motion = now;
+        }
+        op.lost = None;
+        if let Err(e) = self
+            .drive
+            .mapping_twist(MappingTwist {
+                linear_mm_s: (v * 1000.) as f32,
+                angular_rad_s: w as f32,
+                wheel_separation_mm: 243.,
+            })
+            .await
+        {
+            self.hold(op, &e).await;
+        }
+    }
     async fn tick(&self) {
         let _gate = self.gate.lock().await;
         let mut op = self.operation.lock().await;
         if !op.status.active {
+            self.camera.track(false);
             return;
         }
         op.status.elapsed_ms = op.started.elapsed().as_millis() as u64;
-        if op.started.elapsed() > Duration::from_secs(300) {
+        if op.started.elapsed() > Duration::from_secs(if op.cat.is_some() { 3600 } else { 300 }) {
             self.fail(&mut op, "Engine return timed out").await;
             return;
         }
@@ -510,12 +771,14 @@ impl ReturnService {
             }
             return;
         }
-        if sensors.left == Some(true)
-            || sensors.right == Some(true)
-            || sensors.cliff_raw.is_some_and(|x| x != 0)
-            || sensors.wheel_lift_raw.is_some_and(|x| x != 0)
-        {
-            self.fail(&mut op, "Contact, cliff or wheel lift").await;
+        if sensors.cliff_raw.is_some_and(|x| x != 0) {
+            self.fail(&mut op, "Cliff sensor active; movement stopped")
+                .await;
+            return;
+        }
+        if sensors.wheel_lift_raw.is_some_and(|x| x != 0) {
+            self.fail(&mut op, "Wheel lift detected; movement stopped")
+                .await;
             return;
         }
         if !sensors.fresh
@@ -534,9 +797,84 @@ impl ReturnService {
         }
         let geometry = self.geometry.read().await.clone().unwrap();
         let wheels = [native.wheels.values[0], native.wheels.values[1]];
+        let pressed = sensors.left == Some(true) || sensors.right == Some(true);
+        if pressed && op.cat.is_some() {
+            self.fail(&mut op, "Cat search stopped after contact").await;
+            return;
+        }
+        if pressed || op.contact_recovery.is_some() {
+            if op.contact_recovery.is_none() {
+                if op.contact_attempts >= 3 {
+                    self.fail(&mut op, "Bumper still pressed after three escape attempts")
+                        .await;
+                    return;
+                }
+                op.contact_attempts += 1;
+                let turn = match (sensors.left, sensors.right) {
+                    (Some(true), Some(false)) => -1.,
+                    (Some(false), Some(true)) => 1.,
+                    _ => {
+                        if op.contact_attempts % 2 == 1 {
+                            1.
+                        } else {
+                            -1.
+                        }
+                    }
+                };
+                op.contact_recovery = Some(ContactRecovery {
+                    started: Instant::now(),
+                    wheels,
+                    turn,
+                });
+                op.seating = None;
+                let _ = self.drive.stop().await;
+            }
+            let recovery = op.contact_recovery.as_ref().unwrap();
+            let command =
+                recovery.command(wheels, recovery.started.elapsed().as_secs_f64(), pressed);
+            let Some((v, w)) = command else {
+                op.contact_recovery = None;
+                op.navigator.invalidate();
+                op.progress = None;
+                op.lost = None;
+                let _ = self.drive.stop().await;
+                return;
+            };
+            if !contact_recovery_clear(&scan) {
+                self.hold(&mut op, "Bumper escape waiting for rear clearance")
+                    .await;
+                return;
+            }
+            op.status.state = "recovering-contact".into();
+            op.status.message = format!(
+                "Backing away from bumper contact; attempt {}/3",
+                op.contact_attempts
+            );
+            match self
+                .drive
+                .mapping_twist(MappingTwist {
+                    linear_mm_s: (v * 1000.) as f32,
+                    angular_rad_s: w as f32,
+                    wheel_separation_mm: 243.,
+                })
+                .await
+            {
+                Ok(_) => op.lost = None,
+                Err(error) => self.hold(&mut op, &error).await,
+            }
+            return;
+        }
+
         if op.seating.is_some() {
             self.seat_contacts(&mut op, &scan, &geometry, wheels).await;
             return;
+        }
+        if op.status.goal.is_some() && !op.departure_anchored && charging {
+            op.departure_anchored = self
+                .localization
+                .anchor_charging_station(&geometry.map.map_id)
+                .await;
+            op.departing = op.departure_anchored;
         }
         let location = self.localization.status().await;
         if location.map_id.as_deref() != Some(&geometry.map.map_id) {
@@ -602,16 +940,25 @@ impl ReturnService {
             self.seat_contacts(&mut op, &scan, &geometry, wheels).await;
             return;
         }
-        let Some((scan_pose, points)) = self.localization.navigation_scan(&scan).await else {
+        let Some((scan_pose, points, scan_sequence)) =
+            self.localization.navigation_scan(&scan).await
+        else {
             self.hold(&mut op, "Waiting for scan motion alignment")
                 .await;
             return;
         };
         let points = geometry.obstacle_points(scan_pose, &points);
         op.navigator
-            .observe(&geometry, scan_pose, scan.sequence, &points);
-        let (phase, v, w) = if op.detour
-            && op.status.goal.is_none()
+            .observe(&geometry, scan_pose, scan_sequence, &points);
+        if local.x >= 0.42 {
+            op.departing = false;
+        }
+        if op.cat.is_some() {
+            self.cat_tick(&mut op, &geometry, &scan, pose, wheels).await;
+            return;
+        }
+
+        let (phase, v, w) = if (op.departing || (op.detour && op.status.goal.is_none()))
             && local.x < 0.42
             && local.y.abs() < 0.15
             && local.theta.abs() < 0.4
@@ -734,7 +1081,7 @@ impl ReturnService {
             "entering" => "Backing into station",
             "rear-alignment" => "Aligning rear with station",
             "staging" => "Positioning in front of station",
-            "clearing-entry" => "Clearing dock entrance before realigning",
+            "clearing-entry" => "Clearing dock entrance",
             "reseating" => "Clearing contacts for another entry",
             _ => phase,
         }
@@ -1050,5 +1397,45 @@ mod seating_tests {
                 <= -0.15,
             "slow seating must not reduce ramp climbing speed"
         );
+    }
+}
+
+#[cfg(test)]
+mod contact_recovery_tests {
+    use super::*;
+    use crate::components::lidar::LidarPoint;
+    #[test]
+    fn escape_unloads_then_angles_and_is_bounded() {
+        let r = ContactRecovery {
+            started: Instant::now(),
+            wheels: [0., 0.],
+            turn: 1.,
+        };
+        assert_eq!(r.command([0., 0.], 0., true), Some((-0.10, 0.)));
+        assert_eq!(r.command([-50., -50.], 0.5, true), Some((-0.10, 0.25)));
+        assert!(r.command([-65., -65.], 0.7, false).is_none());
+        assert!(r.command([-121., -121.], 1., true).is_none());
+        assert!(r.command([0., 0.], 2., true).is_none());
+        assert!(r.command([-110., 0.], 1., true).is_none());
+    }
+    #[test]
+    fn escape_requires_observed_rear_clearance() {
+        let mut scan = LidarScan::default();
+        assert!(!contact_recovery_clear(&scan));
+        scan.points = vec![
+            LidarPoint {
+                x: -700.,
+                y: 0.,
+                power: 1.
+            };
+            30
+        ];
+        assert!(contact_recovery_clear(&scan));
+        scan.points.push(LidarPoint {
+            x: -200.,
+            y: 210.,
+            power: 1.,
+        });
+        assert!(!contact_recovery_clear(&scan));
     }
 }

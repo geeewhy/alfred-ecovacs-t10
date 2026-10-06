@@ -22,3 +22,5 @@ pub mod scan_matcher;
 pub mod navigation;
 
 pub mod microphone;
+
+pub mod cat_follow;

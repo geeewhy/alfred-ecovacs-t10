@@ -94,6 +94,7 @@ impl HttpRuntime {
         )
         .await;
         let returning = ReturnService::new(
+            self.camera.clone(),
             self.drive.clone(),
             self.lidar.clone(),
             self.mapping.clone(),
@@ -128,6 +129,8 @@ impl HttpRuntime {
             .route("/v1/mapping/reflectance/filter", post(reflection_filter))
             .route("/v1/mapping/reflectance/model", put(reflection_install))
             .route("/v1/mapping/reflectance/model/{id}", get(reflection_model))
+            .route("/v1/cat-follow", get(return_status).post(start_cat_follow))
+            .route("/v1/cat-follow/stop", post(stop_return))
             .route("/v1/navigation", get(return_status).post(start_navigation))
             .route("/v1/navigation/stop", post(stop_return))
             .route("/v1/return", get(return_status).post(start_return))
@@ -688,6 +691,20 @@ async fn native_return_stop(State(state): State<HttpState>) -> impl IntoResponse
 async fn return_status(State(state): State<HttpState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({"ok":true,"result":state.returning.status().await}))
 }
+async fn start_cat_follow(
+    State(state): State<HttpState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let _gate = state.returning.gate.lock().await;
+    let id = body["map_id"].as_str().unwrap_or("").to_string();
+    result(
+        state
+            .returning
+            .follow_cat(id)
+            .await
+            .map(|_| "Cat search started onboard".into()),
+    )
+}
 async fn start_navigation(
     State(state): State<HttpState>,
     Json(goal): Json<NavigationGoal>,
@@ -887,7 +904,15 @@ async fn localization_start(
 
 async fn microphone(State(state): State<HttpState>) -> axum::response::Response {
     match state.microphone.stream().await {
-        Ok(body) => ([("content-type", "application/octet-stream"), ("cache-control", "no-store"), ("x-audio-format", "s16le;rate=16000;channels=1")], body).into_response(),
+        Ok(body) => (
+            [
+                ("content-type", "application/octet-stream"),
+                ("cache-control", "no-store"),
+                ("x-audio-format", "s16le;rate=16000;channels=1"),
+            ],
+            body,
+        )
+            .into_response(),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
     }
 }

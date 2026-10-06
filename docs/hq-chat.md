@@ -112,3 +112,5 @@ include endpointSilenceSeconds and endpoint=webrtc-vad. WebRTC's own speech
 hangover may add a short tail before the two-second non-speech interval.
 
 Direct command grammar: `stop`, `return to station` (also dock/go back), and `go to <section>` bypass the model and telemetry context fetch. Whole-utterance commands accept Alfred/please and punctuation; other speech uses Antigravity. Section resolution still uses the live map catalog and rejects ambiguity. Stop cancels a pending model turn; cancelled resolution cannot initiate movement. Timing records report modelMs=0. Voice still requires wake detection, VAD endpoint and transcription; microphone capture remains suppressed during playback/pending replies.
+
+Movement preparation checks lidar freshness before installing the navigation/return map and starting motion. Stale scans trigger the existing lidar-wake endpoint and require a new scan sequence with engine-reported age <=750ms. Fresh lidar needs no wake. Stop during preparation invalidates the start; failed wake never starts navigation. This applies to section commands and Maps point navigation/onboard return.

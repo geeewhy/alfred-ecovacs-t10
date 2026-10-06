@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm,writeFile} from 'node:fs/promises';
+import {mkdtemp,rm,writeFile,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {MapService} from '../src/maps/map-service.mjs';
@@ -51,9 +51,9 @@ test('each chat request includes fresh section aliases and ambiguity policy with
  const transcript=path.join(dir,'transcript');await writeFile(transcript,'');const calls=[];
  const chat=new ChatService({}, {poll:false,file:path.join(dir,'chat','state.json'),sections:()=>s.sectionCatalog(),command:async args=>{calls.push(args);return {};}});
  await chat.ready;chat.state.enabled=true;chat.session=async()=>({id:'fake',transcript_path:transcript});
- await chat.send('Where is the lounge?');const prompt=calls[0][3];assert.match(prompt,/Living room/);assert.match(prompt,/Lounge/);assert.match(prompt,/never guess/);assert.match(prompt,/not movement authorization/);assert.equal(calls.length,1);
+ await chat.send('Where is the lounge?');const requestPath=sent=>sent.match(/\] Read (.+) and answer its user request\.$/)[1];const prompt=await readFile(requestPath(calls[0][3]),'utf8');assert.match(prompt,/Living room/);assert.match(prompt,/Lounge/);assert.match(prompt,/never guess/);assert.match(prompt,/not movement authorization/);assert.equal(calls.length,1);
  const map=await s.load(m.id);await s.edit(m.id,{revision:1,action:'save-section',id:map.areas[0].id,name:'Office',aliases:[]});
- chat.state.pending=null;await chat.send('What sections do you know?');assert.match(calls[1][3],/Office/);assert.doesNotMatch(calls[1][3],/Living room/);
+ chat.state.pending=null;await chat.send('What sections do you know?');const updated=await readFile(requestPath(calls[1][3]),'utf8');assert.match(updated,/Office/);assert.doesNotMatch(updated,/Living room/);
 }));
 
 test('section labels stay inside concave floor and outside holes',()=>{

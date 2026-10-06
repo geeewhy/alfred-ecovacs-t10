@@ -272,14 +272,14 @@ test('return waits for navigation startup and proceeds without another user acti
 });
 
 test('onboard return installs saved map then hands off without companion heartbeat',async()=>{
- const calls=[];const service=new MapService({stop:async()=>{},onboardReturn:async(action='status',body)=>{calls.push(action);if(action==='config')assert.equal(body.map_id,'primary');return {active:false};}});
+ const calls=[];const service=new MapService({ensureMappingLidar:async()=>{calls.push('lidar-ready');},stop:async()=>{},onboardReturn:async(action='status',body)=>{calls.push(action);if(action==='config')assert.equal(body.map_id,'primary');return {active:false};}});
  service.navigation={call:async()=>{throw Error('companion offline');}};
  service.load=async()=>({station:{source:'docked-robot-pose',x:1,y:2,theta:0},checkpoint:{nativeGrid:{width:10,height:10,resolution:.05,origin:[0,0],cells:[[0,0,127]]}}});
- await service.returnOnboard('primary');assert.deepEqual(calls,['status','config','start','status']);assert.equal(service.active,null);
+ await service.returnOnboard('primary');assert.deepEqual(calls,['status','lidar-ready','config','start','status']);assert.equal(service.active,null);
 });
 test('Stop while uploading onboard map cancels pending engine start',async()=>{
  let release,entered;const waiting=new Promise(r=>entered=r),upload=new Promise(r=>release=r),calls=[];
- const service=new MapService({stop:async()=>{},onboardReturn:async(action='status')=>{calls.push(action);if(action==='config'){entered();await upload;}return {active:false};}});
+ const service=new MapService({ensureMappingLidar:async()=>{calls.push('lidar-ready');},stop:async()=>{},onboardReturn:async(action='status')=>{calls.push(action);if(action==='config'){entered();await upload;}return {active:false};}});
  service.navigation={call:async()=>{}};service.load=async()=>({station:{source:'docked-robot-pose',x:1,y:2,theta:0},checkpoint:{nativeGrid:{cells:[[0,0,127]]}}});
  const pending=service.returnOnboard('primary');await waiting;await service.stopExploration();release();await assert.rejects(pending,/cancelled/);assert(!calls.includes('start'));
 });

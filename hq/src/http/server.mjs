@@ -40,6 +40,7 @@ export class HqServer {
           if(request.method==="GET")return json(response,200,{ok:true,result:(await this.maps.navigation.call("status")).settings});
           if(request.method==="PUT"){if(this.maps.active?.status.state==="scanning")await this.maps.pauseActive();else await this.maps.navigation.call("pause");return json(response,200,{ok:true,result:await this.maps.navigation.call("settings",await readJson(request))});}
         }
+        if(url.pathname === "/api/maps/cat-follow/stop" && request.method === "POST") { this.maps.epoch++; return json(response,200,{ok:true,result:await this.engineClient.catFollow("stop")}); }
         if(url.pathname === "/api/maps/engine-return" && request.method === "GET") return json(response,200,{ok:true,result:await this.engineClient.onboardReturn()});
         if(url.pathname === "/api/maps/sections" && request.method === "GET") return json(response,200,{ok:true,result:await this.maps.sectionCatalog()});
         if(url.pathname === "/api/maps/sections/resolve" && request.method === "GET") return json(response,200,{ok:true,result:await this.maps.resolveSection(url.searchParams.get("name"),url.searchParams.get("map_id"))});
@@ -53,6 +54,7 @@ export class HqServer {
         else if (id && action === "position" && request.method === "GET") result = await this.maps.position(id);
         else if (id && action === "edit" && request.method === "POST") result = await this.maps.edit(id, await readJson(request));
         else if (id && action === "navigate" && request.method === "POST") result = await this.maps.navigateTo(id, await readJson(request));
+        else if (id && action === "cat-follow" && request.method === "POST") result = await this.maps.followCat(id);
         else if (id && action === "return-onboard" && request.method === "POST") result = await this.maps.returnOnboard(id);
         else if (id && action === "return" && request.method === "POST") result = await this.maps.returnToStation(id);
         else if (id && action === "scan" && request.method === "POST") {

@@ -62,6 +62,7 @@ impl CameraFrameSource for NativeCamera {
             if let Ok(contents) = tokio::fs::read(&self.path).await
                 && contents.len() >= 4
                 && contents.starts_with(&[0xff, 0xd8])
+                && contents.ends_with(&[0xff, 0xd9])
             {
                 jpeg = contents;
                 break;
@@ -84,6 +85,8 @@ impl CameraFrameSource for NativeCamera {
 pub struct CameraTelemetry {
     source: Arc<dyn CameraFrameSource>,
     frame: RwLock<Option<CameraFrame>>,
+    vision: RwLock<Option<super::cat_follow::Frame>>,
+    tracking: AtomicBool,
 }
 
 impl CameraTelemetry {
@@ -91,6 +94,8 @@ impl CameraTelemetry {
         Arc::new(Self {
             source,
             frame: RwLock::new(None),
+            vision: RwLock::new(None),
+            tracking: AtomicBool::new(false),
         })
     }
 
@@ -98,27 +103,58 @@ impl CameraTelemetry {
         self.frame.read().await.clone()
     }
 
+    pub fn track(&self, active: bool) {
+        self.tracking.store(active, Ordering::Release);
+    }
+    pub async fn vision(&self) -> Option<super::cat_follow::Frame> {
+        self.vision.read().await.clone()
+    }
+
     pub fn start(self: &Arc<Self>) {
         let service = Arc::clone(self);
         tokio::spawn(async move {
             loop {
                 match service.source.capture().await {
-                    Ok(frame) => *service.frame.write().await = Some(frame),
+                    Ok(frame) => {
+                        if service.tracking.load(Ordering::Acquire) {
+                            let copy = frame.clone();
+                            if let Ok(Ok(decoded)) = tokio::task::spawn_blocking(move || {
+                                super::cat_follow::decode(&copy.jpeg, copy.observed_at_unix_ms)
+                            })
+                            .await
+                            {
+                                *service.vision.write().await = Some(decoded);
+                            }
+                        }
+                        *service.frame.write().await = Some(frame);
+                    }
                     Err(error) => eprintln!("camera capture retrying: {error}"),
                 }
-                tokio::time::sleep(Duration::from_millis(650)).await;
+                tokio::time::sleep(Duration::from_millis(
+                    if service.tracking.load(Ordering::Acquire) {
+                        100
+                    } else {
+                        650
+                    },
+                ))
+                .await;
             }
         });
     }
 }
 
 async fn mdsctl(component: &str, request: &str) -> Result<(), String> {
-    let output = Command::new("mdsctl")
-        .arg(component)
-        .arg(request)
-        .output()
-        .await
-        .map_err(|error| format!("cannot run mdsctl: {error}"))?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(2),
+        Command::new("mdsctl")
+            .arg(component)
+            .arg(request)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "camera command timed out".to_string())?
+    .map_err(|error| format!("cannot run mdsctl: {error}"))?;
     let response = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() || response.contains("\"fail\"") {
         return Err(format!("{component} rejected camera request"));

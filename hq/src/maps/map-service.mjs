@@ -292,6 +292,21 @@ export class MapService {
   summary() {
     return this.active ? { id: this.active.id, ...this.active.status } : null;
   }
+  async followCat(id) {
+    const intent=++this.epoch;
+    const map=await this.load(id),grid=map.checkpoint?.nativeGrid;
+    if(!grid?.cells?.length)throw Error("A saved map is required for cat search");
+    if((await this.engine.onboardReturn()).active)throw Error("Stop the active navigation task first");
+    if(this.epoch!==intent)throw Error("Cat search preparation cancelled");
+    await this.pauseActive();
+    const epoch=this.epoch;
+    await this.engine.ensureMappingLidar();
+    if(this.epoch!==epoch)throw Error("Cat search preparation cancelled");
+    await this.engine.localization("map",{map_id:id,revision:`hq-${map.revision}`,grid});
+    if(this.epoch!==epoch)throw Error("Cat search preparation cancelled");
+    await this.engine.catFollow("start",{map_id:id});
+    return this.engine.catFollow();
+  }
   async navigateTo(id,pose) {
     if(!pose || !["x","y","theta"].every(k=>Number.isFinite(pose[k])))throw Error("Choose a finite map destination and heading");
     const intent=++this.epoch;
@@ -300,6 +315,8 @@ export class MapService {
     if(this.epoch!==intent)throw Error("Navigation preparation cancelled");
     await this.pauseActive();
     const epoch=this.epoch;
+    await this.engine.ensureMappingLidar();
+    if(this.epoch!==epoch)throw Error("Navigation preparation cancelled");
     await this.engine.localization("map",{map_id:id,revision:`hq-${map.revision}`,grid});
     if(this.epoch!==epoch)throw Error("Navigation preparation cancelled");
     await this.engine.navigate("start",{map_id:id,pose});
@@ -315,6 +332,8 @@ export class MapService {
     if(this.epoch!==intent)throw Error("Onboard return preparation cancelled");
     await this.pauseActive();
     const epoch=this.epoch;
+    await this.engine.ensureMappingLidar();
+    if(this.epoch!==epoch)throw Error("Onboard return preparation cancelled");
     // Stop a running companion before handing ownership to the robot. Its
     // availability is not required when no HQ motion operation exists.
     const {x,y,theta}=map.station;

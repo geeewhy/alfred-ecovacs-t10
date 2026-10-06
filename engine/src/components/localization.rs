@@ -200,6 +200,7 @@ struct State {
     boot: String,
     search: Option<tokio::task::JoinHandle<(u64, Pose, Instant, Vec<Hypothesis>)>>,
     last_scan_stamp: Option<f64>,
+    navigation_frame: Option<LidarScan>,
     last_search: Instant,
     last_global: Instant,
     modes: Vec<Hypothesis>,
@@ -208,6 +209,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             last_scan_stamp: None,
+            navigation_frame: None,
             modes: Vec::new(),
             map: None,
             generation: 0,
@@ -248,6 +250,7 @@ pub fn advance(p: Pose, from: Pose, to: Pose) -> Pose {
 }
 fn invalidate(s: &mut State, message: &str) {
     s.generation += 1;
+    s.navigation_frame = None;
     s.modes.clear();
     s.anchor = None;
     s.consensus = Consensus::default();
@@ -258,6 +261,14 @@ fn invalidate(s: &mut State, message: &str) {
     s.message = message.into();
     // Keep the in-flight worker until it finishes; generation rejects its result.
     // spawn_blocking cannot be aborted once running. Never spawn overlapping searches.
+}
+fn anchor_station(s: &mut State, station: Pose) {
+    invalidate(s, "Position anchored by charging contact at saved station");
+    s.pose = Some(station);
+    s.anchor = Some(MotionPrior::new(station));
+    s.matched = Some(Instant::now());
+    s.confirm = CONFIRM_SCANS;
+    s.score = 1.;
 }
 fn accept_match(
     s: &mut State,
@@ -358,8 +369,8 @@ impl LocalizationService {
         });
         service
     }
-    pub async fn navigation_scan(&self, scan: &LidarScan) -> Option<(Pose, Vec<[f64; 2]>)> {
-        let s = self.state.lock().await;
+    pub async fn navigation_scan(&self, scan: &LidarScan) -> Option<(Pose, Vec<[f64; 2]>, u32)> {
+        let mut s = self.state.lock().await;
         let pose = s.pose?;
         if !s
             .matched
@@ -367,8 +378,8 @@ impl LocalizationService {
         {
             return None;
         }
-        let at = interpolate(&s.history, scan.source_stamp)?;
-        let corrected = deskew(scan, &s.history, 0.2)?;
+        let corrected = navigation_frame(&mut s, scan)?;
+        let at = interpolate(&s.history, corrected.source_stamp)?;
         Some((
             advance(pose, s.odom, at),
             corrected
@@ -377,6 +388,7 @@ impl LocalizationService {
                 .filter(|p| p.power > 0.)
                 .map(|p| [p.x as f64 / 1000., p.y as f64 / 1000.])
                 .collect(),
+            corrected.sequence,
         ))
     }
     pub async fn navigation_map(&self) -> Option<ReturnMap> {
@@ -461,6 +473,28 @@ impl LocalizationService {
         s.map = Some(Arc::new(map));
         s.sequence = 0;
         Ok(())
+    }
+    /// Called only with fresh charging contact, before a departure can move.
+    /// The saved station is a physical position observation, not a map guess.
+    pub async fn anchor_charging_station(&self, map_id: &str) -> bool {
+        let native = self.mapping.status().await;
+        if !native.wheels.age_ms.is_some_and(|age| age < 500) {
+            return false;
+        }
+        let mut s = self.state.lock().await;
+        let station = s
+            .map
+            .as_ref()
+            .filter(|m| m.config.map_id == map_id)
+            .and_then(|m| m.config.station);
+        let Some(station) = station else {
+            return false;
+        };
+        if s.boot != native.boot_id {
+            return false;
+        }
+        anchor_station(&mut s, station);
+        true
     }
     pub async fn locate(&self, map_id: &str) -> Result<(), String> {
         let mut s = self.state.lock().await;
@@ -763,6 +797,26 @@ pub(crate) fn scan_points(scan: &LidarScan) -> Vec<[f64; 2]> {
             [d * a.cos(), d * a.sin()]
         })
         .collect()
+}
+
+// Independently scheduled wheel and lidar callbacks need not arrive together.
+// Preserve the last coherent frame briefly; never refresh its receipt timestamp.
+fn navigation_frame(s: &mut State, scan: &LidarScan) -> Option<LidarScan> {
+    if s.navigation_frame
+        .as_ref()
+        .is_none_or(|f| f.sequence != scan.sequence)
+    {
+        if let Some(frame) = deskew(scan, &s.history, 0.2) {
+            s.navigation_frame = Some(frame);
+        }
+    }
+    s.navigation_frame
+        .as_ref()
+        .filter(|f| {
+            f.received_at
+                .is_some_and(|t| t.elapsed() < Duration::from_millis(500))
+        })
+        .cloned()
 }
 
 fn deskew(scan: &LidarScan, history: &VecDeque<(f64, Pose)>, period: f64) -> Option<LidarScan> {
@@ -1111,5 +1165,57 @@ mod relocation_tests {
             m[1].likelihood = 0.90;
             assert!(r.observe(&m, odom).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod dock_anchor_tests {
+    use super::*;
+    #[test]
+    fn physical_contact_replaces_lost_position_and_invalidates_pending_search() {
+        let mut s = State::default();
+        let generation = s.generation;
+        let station = Pose {
+            x: 4.6,
+            y: -1.7,
+            theta: 1.6,
+        };
+        anchor_station(&mut s, station);
+        assert!(s.generation > generation);
+        assert_eq!(s.pose.unwrap().x, station.x);
+        assert!(s.anchor.unwrap().accepts(station));
+        assert_eq!(s.confirm, CONFIRM_SCANS);
+        assert!(s.matched.unwrap().elapsed().as_secs_f64() < 1.);
+    }
+}
+
+#[cfg(test)]
+mod navigation_frame_tests {
+    use super::*;
+    #[test]
+    fn new_scan_waits_for_odometry_without_discarding_fresh_aligned_frame() {
+        let mut s = State::default();
+        s.history = VecDeque::from([(1., Pose::default()), (1.3, Pose::default())]);
+        let old = LidarScan {
+            sequence: 1,
+            source_stamp: 1.25,
+            received_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        assert_eq!(navigation_frame(&mut s, &old).unwrap().sequence, 1);
+        let new = LidarScan {
+            sequence: 2,
+            source_stamp: 1.4,
+            received_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        assert_eq!(navigation_frame(&mut s, &new).unwrap().sequence, 1);
+        s.history.push_back((1.45, Pose::default()));
+        assert_eq!(navigation_frame(&mut s, &new).unwrap().sequence, 2);
+        s.navigation_frame.as_mut().unwrap().received_at =
+            Some(Instant::now() - Duration::from_millis(501));
+        assert!(navigation_frame(&mut s, &new).is_none());
+        invalidate(&mut s, "map changed");
+        assert!(s.navigation_frame.is_none());
     }
 }

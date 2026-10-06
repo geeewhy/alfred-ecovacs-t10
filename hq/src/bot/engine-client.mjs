@@ -12,6 +12,13 @@ export class EngineClient {
     return value.result;
   }
 
+  async catFollow(action="status",body) {
+    const response=await this.request(action==="stop"?"/v1/cat-follow/stop":"/v1/cat-follow",8000,{method:action==="status"?"GET":"POST",headers:{"content-type":"application/json"},...(body?{body:JSON.stringify(body)}:{})});
+    const value=await response.json();
+    if(!response.ok||!value.ok)throw Error(value.result||value.error||"Cat mode unavailable");
+    return value.result;
+  }
+
   async navigate(action="status",body) {
     const path=action==="stop"?"/v1/navigation/stop":"/v1/navigation";
     const response=await this.request(path,8000,{method:action==="status"?"GET":"POST",headers:{"content-type":"application/json"},...(body?{body:JSON.stringify(body)}:{})});
