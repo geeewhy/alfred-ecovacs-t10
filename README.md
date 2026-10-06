@@ -24,4 +24,4 @@ Open http://127.0.0.1:4173. See [voice setup](docs/hq-chat.md) for wake-word det
 
 [Navigation](docs/native-navigation.md) · [Cat-follow](docs/cat-follow.md) · [Runtime tools](docs/runtime.md)
 
-[^1]: AI conversation and LLM integration are powered by Haicue.
+[^1]: AI conversation and LLM integration are powered by [Haicue](https://haicue.com/pilot).
